@@ -49,7 +49,7 @@ tool_timeout_sec = 30
 第一次检查用于确认端点只提供这七个工具，并且会话确实落盘：
 
 1. 客户端对 `http://127.0.0.1:8931/mcp` 完成 MCP 握手，`tools/list` 恰好返回上述七个工具。
-2. 用绝对 `cwd` 与一条提示词调用 `session_start`，在轮次结束之前就立即返回 `session_id` 与 `accepted: true`；若该路径已有工作区，新会话会出现在其中，其他路径仍保持未分组。
+2. 把客户端的真实项目目录作为 `cwd`，连同一条提示词调用 `session_start`；它会在轮次结束前立即返回 `session_id` 与 `accepted: true`。若该路径已有工作区，新会话会出现在其中，其他路径仍保持未分组。省略 `agent_preset` 才会使用部署默认值；继续协调前检查回执中的 `cwd`、`workspace` 与 `agent_preset`。
 3. 用该 id 调用 `events_read`，返回页的 `events` 中包含原生 `turn/start` 与 `agent/inbox/spliced` 记录；重复读取返回相同事件。
 4. 让模型通过它自己的 subagent 工具创建一个 child，随后 `agents_list` 会显示该 child 及其 `parentId` 与 `depth`。
 5. `child_send` 返回 `message_id`，child 自己的日志在该次投递之后显示这条消息及其回答。

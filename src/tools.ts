@@ -39,7 +39,9 @@ const messageBody = z.string()
 const requestIdSchema = z.string().min(1).max(256)
 
 /** Working directory `session_start` accepts; the platform predicate is the one the Session header validates `cwd` with. */
-const cwdSchema = z.string().min(1).refine(value => isAbsolute(value), { message: 'must be an absolute path' })
+const cwdSchema = z.string().min(1)
+  .refine(value => isAbsolute(value), { message: 'must be an absolute path' })
+  .describe('The MCP client\'s actual project directory. It selects DSH project context and Workspace grouping; a temporary directory does not make the Session read-only.')
 
 /** Whether a message queues a later turn or targets the nearest step. */
 const deliverySchema = z.enum(['queue', 'steer']).default('queue')
@@ -49,6 +51,13 @@ const promptReceiptSchema = z.object({
   session_id: z.string(),
   request_id: z.string(),
   accepted: z.literal(true),
+})
+
+/** `session_start` receipt with the project context DSH actually selected. */
+const startReceiptSchema = promptReceiptSchema.extend({
+  cwd: z.string(),
+  workspace: z.object({ id: z.string(), title: z.string() }).nullable(),
+  agent_preset: z.string().nullable(),
 })
 
 /** Mint the client correlation identity when the caller did not supply one. */
@@ -75,19 +84,22 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
     {
       title: 'Start a DSH session',
       description:
-        'Create a root DSH session at an absolute working directory, or adopt the existing session with the supplied id, then submit one text prompt. '
+        'Create a root DSH session in the MCP client\'s actual project directory, or adopt the existing session with the supplied id, then submit one text prompt. '
+        + 'cwd selects project context and Workspace grouping; using a temporary directory creates an ungrouped temporary context and does not enforce read-only access. '
         + 'If the directory belongs to a registered DSH workspace, attach the session there; otherwise leave it ungrouped. '
+        + 'Omit agent_preset to use the deployment\'s configured default; set it only as an intentional, known override. '
         + 'Returns once DSH accepts the prompt and never waits for the turn to finish. '
         + 'Reusing the same request_id links a retry to the message the first attempt persisted. '
         + 'A failure that reports stage "create" still carries the session_id it tried to create, so a retry can adopt that id instead of creating a second session.',
       inputSchema: boundedInputSchema(deps, 'session_start', z.strictObject({
         cwd: cwdSchema,
         prompt: messageBody,
-        agent_preset: z.string().min(1).max(256).optional(),
+        agent_preset: z.string().min(1).max(256).optional()
+          .describe('Explicit DSH Agent preset override. Omit it to use the deployment default.'),
         session_id: opaqueId.optional(),
         request_id: requestIdSchema.optional(),
       })),
-      outputSchema: promptReceiptSchema,
+      outputSchema: startReceiptSchema,
     },
     async (args, context) => {
       const requestId = resolveRequestId(args.request_id)
@@ -98,6 +110,9 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       // retry without the id would create a second one.
       const attempted = args.session_id === undefined ? mintSessionId() : SessionId(args.session_id)
       let sessionId: SessionId
+      let resolvedCwd = args.cwd
+      let workspaceReceipt: { id: string; title: string } | null = null
+      let agentPreset: string | null = null
       try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         const workspace = await withinDeadline(
@@ -110,6 +125,9 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
           ...(args.agent_preset === undefined ? {} : { agentPreset: args.agent_preset }),
         }), guard.signal)
         sessionId = created.sessionId
+        resolvedCwd = workspace?.path ?? args.cwd
+        workspaceReceipt = workspace === undefined ? null : { id: workspace.id, title: workspace.title }
+        agentPreset = created.agentPreset ?? null
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, {
           session_id: attempted,
@@ -130,7 +148,14 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         // caller can locate it and decide whether to resend.
         return failureResult(deps, error, guard.signal, { ...correlation, stage: 'prompt' })
       }
-      return okWithinBudget(deps, { session_id: sessionId, request_id: requestId, accepted: true })
+      return okWithinBudget(deps, {
+        session_id: sessionId,
+        request_id: requestId,
+        accepted: true,
+        cwd: resolvedCwd,
+        workspace: workspaceReceipt,
+        agent_preset: agentPreset,
+      })
     },
   )
 }

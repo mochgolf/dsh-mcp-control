@@ -94,12 +94,12 @@ describe('session_start', () => {
     const workspace = harness.ctx.workspaceRegistry.list()[0]
     if (workspace === undefined) throw new Error('the registered workspace is missing')
 
-    await call(client, 'session_start', {
+    const grouped = await call(client, 'session_start', {
       cwd: harness.workspace,
       prompt: 'group this session',
       session_id: 'root-grouped',
     })
-    await call(client, 'session_start', {
+    const ungrouped = await call(client, 'session_start', {
       cwd: harness.persistenceRoot,
       prompt: 'leave this session ungrouped',
       session_id: 'root-ungrouped',
@@ -119,6 +119,12 @@ describe('session_start', () => {
     expect(create.mock.calls[1]?.[0]).not.toHaveProperty('workspaceId')
     expect(create.mock.calls[2]?.[0]).toMatchObject({ cwd: `${harness.workspace}/missing`, sessionId: 'root-unresolved' })
     expect(workspace.sessionIds).toEqual([SessionId('root-grouped')])
+    expect(grouped).toMatchObject({
+      cwd: harness.workspace,
+      workspace: { id: workspace.id, title: workspace.title },
+      agent_preset: null,
+    })
+    expect(ungrouped).toMatchObject({ cwd: harness.persistenceRoot, workspace: null, agent_preset: null })
   })
 
   it('answers with a receipt while the turn is still running', { timeout: 30_000 }, async () => {

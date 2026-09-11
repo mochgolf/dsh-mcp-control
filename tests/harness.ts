@@ -129,6 +129,7 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
       ? {
           id: WorkspaceId('workspace-fixture'),
           path: workspace,
+          title: 'fixture workspace',
           get sessionIds(): readonly SessionId[] { return workspaceSessionIds },
           async attachSession(sessionId: SessionId): Promise<void> {
             if (!workspaceSessionIds.includes(sessionId)) workspaceSessionIds.unshift(sessionId)
