@@ -49,7 +49,7 @@ The client lists seven tools: `session_start`, `session_send`, `session_cancel`,
 A first check confirms the endpoint serves only the seven tools and that a Session reaches disk:
 
 1. The client completes the MCP handshake against `http://127.0.0.1:8931/mcp` and `tools/list` returns exactly the seven tools above.
-2. `session_start` with an absolute `cwd` and a prompt returns `session_id` and `accepted: true` immediately, before the turn finishes.
+2. `session_start` with an absolute `cwd` and a prompt returns `session_id` and `accepted: true` immediately, before the turn finishes; when that path already belongs to a Workspace, the new Session appears there, while any other path remains ungrouped.
 3. `events_read` for that id returns a page whose `events` include the native `turn/start` and `agent/inbox/spliced` records, and repeating the read returns the same events.
 4. Let the model create a child through its own subagent tool, then `agents_list` shows that child with its `parentId` and `depth`.
 5. `child_send` returns a `message_id`, and the child's own log shows the message and its answer after the delivery.

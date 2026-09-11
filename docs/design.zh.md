@@ -16,11 +16,11 @@ Session Controller 与 subagent 运行时已经拥有这类客户端所需的全
 
 一个可选插件 `@mochgolf/dsh-mcp-control`，设计为通过 patch overlay（`examples/cordis.yml`）加载进 DSH Web profile。它经 `ctx.effect(() => ctx.webServer.register(...))` 在共享的 `ctx.webServer` 上注册一条精确路由。没有 daemon、没有第二个 `createServer()`、没有私有 wire client，也没有 stdout scraping；路由跟随 Web 实例自身的 host 与 port，当该绑定不是 loopback 时加载失败。
 
-插件注入 `webServer`、`sessionController`、`subagents` 与 `credentials`。它不发布 `./invariant` 伴随包：它不持有任何可能被独立观察出分歧的持久化或内存投影，因此它转发的每种关系都已经在 DSH 拥有它们的地方可观察。
+插件注入 `webServer`、`sessionController`、`subagents`、`credentials` 与 `workspaceRegistry`。它不发布 `./invariant` 伴随包：它不持有任何可能被独立观察出分歧的持久化或内存投影，因此它转发的每种关系都已经在 DSH 拥有它们的地方可观察。
 
 ### 七个工具，没有任务状态
 
-`session_start`、`session_send`、`session_cancel`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read` 一一映射到 Session Controller 与 subagent 方法。`child_send` 使用 `ctx.subagents.prompt` 并固定 `mode: continuable`，`child_interrupt` 使用 `interruptByParent`，因此 live direct parent 要求与 parent 授权校验留在已经实施它们的服务中。`agents_list` 原样转发原生 durable 条目（含 diagnostic），且从不重编号。`session_start` 接受的 `cwd` 与平台自身判定为绝对路径的取值完全一致，用的就是 Session header 校验 `cwd` 的同一个 `node:path` 谓词，因此 Windows 盘符根路径或 UNC 路径会被接受，而不是被 POSIX 前缀判断拒绝。它还在调用 `create` 之前自行选定会话 id，因为超过本次调用截止时间的 create 仍可能完成：否则客户端手里没有任何办法寻址该会话——接口没有枚举能力，重试还会再建一个。
+`session_start`、`session_send`、`session_cancel`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read` 使用拥有相应效果的 Session Controller 与 subagent 方法。`child_send` 使用 `ctx.subagents.prompt` 并固定 `mode: continuable`，`child_interrupt` 使用 `interruptByParent`，因此 live direct parent 要求与 parent 授权校验留在已经实施它们的服务中。`agents_list` 原样转发原生 durable 条目（含 diagnostic），且从不重编号。`session_start` 接受的 `cwd` 与平台自身判定为绝对路径的取值完全一致，用的就是 Session header 校验 `cwd` 的同一个 `node:path` 谓词，因此 Windows 盘符根路径或 UNC 路径会被接受，而不是被 POSIX 前缀判断拒绝。它通过 `workspaceRegistry.resolveByPath` 查询现有的规范路径所有者，再把该工作区 id 交给 Session Controller；查询未命中或路径解析失败时仍走原来的 `cwd` 路径，而且不会创建工作区。它还在调用 `create` 之前自行选定会话 id，因为超过本次调用截止时间的 create 仍可能完成：否则客户端手里没有任何办法寻址该会话——接口没有枚举能力，重试还会再建一个。
 
 每个回执报告的都是原生服务报告的内容。`accepted: true` 意味着 DSH 接收了工作；它绝不意味着某个轮次已结束、队列顺序得到承诺，或某个 child 已经存在。插件从不重试、从不保存 job、从不把 session 映射为 task，也从不创建 child——模型自己的 subagent 工具负责创建，端点只观察结果。
 

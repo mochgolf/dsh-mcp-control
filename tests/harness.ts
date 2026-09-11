@@ -22,6 +22,7 @@ import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { MockAdapter } from './support/mock-adapter.ts'
 import { createSessionTestController } from './support/session-controller.ts'
@@ -86,6 +87,8 @@ export interface HarnessOptions {
   readonly persistenceRoot?: string
   /** Keep the workspace and persistence roots on dispose, so a restarted instance can reuse them. */
   readonly retainRoots?: boolean
+  /** Register the workspace root so session_start can exercise native workspace attachment. */
+  readonly registerWorkspace?: boolean
 }
 
 /**
@@ -119,6 +122,23 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
     let token: string | undefined = options.token === undefined && 'token' in options ? undefined : options.token ?? TEST_TOKEN
     ctx.provide('credentials', {
       resolve: async () => (token === undefined ? undefined : { value: token, source: 'test' }),
+    } as never)
+
+    const workspaceSessionIds: SessionId[] = []
+    const registeredWorkspace = options.registerWorkspace === true
+      ? {
+          id: WorkspaceId('workspace-fixture'),
+          path: workspace,
+          get sessionIds(): readonly SessionId[] { return workspaceSessionIds },
+          async attachSession(sessionId: SessionId): Promise<void> {
+            if (!workspaceSessionIds.includes(sessionId)) workspaceSessionIds.unshift(sessionId)
+          },
+        }
+      : undefined
+    ctx.provide('workspaceRegistry', {
+      resolveByPath: async (path: string) => registeredWorkspace?.path === path ? registeredWorkspace : undefined,
+      get: (id: string) => registeredWorkspace?.id === id ? registeredWorkspace : undefined,
+      list: () => registeredWorkspace === undefined ? [] : [registeredWorkspace],
     } as never)
 
     // The Service constructor registers `sessionController` on this context.

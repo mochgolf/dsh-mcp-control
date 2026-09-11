@@ -84,6 +84,43 @@ function rpcIdOf(event: { type: string; data: unknown }): string | undefined {
 }
 
 describe('session_start', () => {
+  it('attaches an exact registered workspace and keeps other directories ungrouped', { timeout: 30_000 }, async () => {
+    const harness = await boot({
+      registerWorkspace: true,
+      script: [textResponse('grouped'), textResponse('ungrouped'), textResponse('unresolved')],
+    })
+    const client = await clientFor(harness)
+    const create = vi.spyOn(harness.ctx.sessionController, 'create')
+    const workspace = harness.ctx.workspaceRegistry.list()[0]
+    if (workspace === undefined) throw new Error('the registered workspace is missing')
+
+    await call(client, 'session_start', {
+      cwd: harness.workspace,
+      prompt: 'group this session',
+      session_id: 'root-grouped',
+    })
+    await call(client, 'session_start', {
+      cwd: harness.persistenceRoot,
+      prompt: 'leave this session ungrouped',
+      session_id: 'root-ungrouped',
+    })
+    vi.spyOn(harness.ctx.workspaceRegistry, 'resolveByPath').mockRejectedValueOnce(
+      Object.assign(new Error('path disappeared'), { code: 'ENOENT' }),
+    )
+    await call(client, 'session_start', {
+      cwd: `${harness.workspace}/missing`,
+      prompt: 'retain cwd creation',
+      session_id: 'root-unresolved',
+    })
+
+    expect(create.mock.calls[0]?.[0]).toMatchObject({ workspaceId: workspace.id, sessionId: 'root-grouped' })
+    expect(create.mock.calls[0]?.[0]).not.toHaveProperty('cwd')
+    expect(create.mock.calls[1]?.[0]).toMatchObject({ cwd: harness.persistenceRoot, sessionId: 'root-ungrouped' })
+    expect(create.mock.calls[1]?.[0]).not.toHaveProperty('workspaceId')
+    expect(create.mock.calls[2]?.[0]).toMatchObject({ cwd: `${harness.workspace}/missing`, sessionId: 'root-unresolved' })
+    expect(workspace.sessionIds).toEqual([SessionId('root-grouped')])
+  })
+
   it('answers with a receipt while the turn is still running', { timeout: 30_000 }, async () => {
     const harness = await boot({ script: ['hang', textResponse('later')] })
     const client = await clientFor(harness)

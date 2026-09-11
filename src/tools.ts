@@ -76,6 +76,7 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       title: 'Start a DSH session',
       description:
         'Create a root DSH session at an absolute working directory, or adopt the existing session with the supplied id, then submit one text prompt. '
+        + 'If the directory belongs to a registered DSH workspace, attach the session there; otherwise leave it ungrouped. '
         + 'Returns once DSH accepts the prompt and never waits for the turn to finish. '
         + 'Reusing the same request_id links a retry to the message the first attempt persisted. '
         + 'A failure that reports stage "create" still carries the session_id it tried to create, so a retry can adopt that id instead of creating a second session.',
@@ -98,8 +99,13 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       const attempted = args.session_id === undefined ? mintSessionId() : SessionId(args.session_id)
       let sessionId: SessionId
       try {
+        // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
+        const workspace = await withinDeadline(
+          deps.ctx.workspaceRegistry.resolveByPath(args.cwd).catch(() => undefined),
+          guard.signal,
+        )
         const created = await withinDeadline(deps.ctx.sessionController.create({
-          cwd: args.cwd,
+          ...(workspace === undefined ? { cwd: args.cwd } : { workspaceId: workspace.id }),
           sessionId: attempted,
           ...(args.agent_preset === undefined ? {} : { agentPreset: args.agent_preset }),
         }), guard.signal)
