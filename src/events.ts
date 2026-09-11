@@ -354,7 +354,8 @@ export function registerEventsRead(server: McpServer, deps: ControlDeps): void {
         'Read the durable raw event log of a root session or one addressed subagent child, forward from after_seq (default -1, the first event). '
         + 'Events are relayed exactly as DSH exposes them, including tool results, metadata, sourceEventSeqs, and ignorable markers; the page stops at a fixed watermark '
         + 'and never activates a cold session. An event too large for one result is reported as oversized_event with its byte length and sha256, then retrieved with '
-        + 'mode "chunk" using the same address; concatenate the base64 chunks, verify the sha256, and parse the bytes as UTF-8 JSON to recover the exact event.',
+        + 'mode "chunk" using the same address; concatenate the base64 chunks, verify the sha256, and parse the bytes as UTF-8 JSON to recover the exact event. '
+        + 'Continue only from the returned next_seq; never guess a cursor or advance past an oversized_event before its chunks verify, because that skips durable events.',
       inputSchema: boundedInputSchema(deps, 'events_read', z.union([chunkSchema, pageSchema])),
       outputSchema: z.union([chunkOutputSchema, pageOutputSchema]),
       annotations: { readOnlyHint: true },
