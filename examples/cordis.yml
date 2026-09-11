@@ -1,0 +1,22 @@
+# Opt-in MCP control endpoint for one local DSH Web instance.
+#
+# This overlay adds the `mcp-control` row to the shipped Web profile. It is a
+# PATCH OVERLAY (`dsh --profile web --patch <this file>`), not a tree, and it
+# carries only the credential *reference*: the token itself stays in the
+# environment of the DSH process.
+#
+# The token is full control of every Session this instance knows by id, so
+# treat this endpoint like local shell access. It binds on the Web instance's
+# own loopback listener; there is no second listener and no remote exposure.
+#
+#   DSH_MCP_CONTROL_TOKEN=... dsh --profile web --patch ./cordis.yml \
+#     --host 127.0.0.1 --port 8931 --no-open
+#
+# See docs/usage.md for the client configuration and the full
+# verification path.
+
+- insert:
+    - id: mcp-control
+      name: '@mochgolf/dsh-mcp-control'
+      config:
+        tokenRef: DSH_MCP_CONTROL_TOKEN
