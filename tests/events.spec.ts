@@ -7,9 +7,7 @@
 
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -461,48 +459,44 @@ describe('events_read result budget', () => {
     expect((resumed.events as Array<{ seq: number }>)[0]?.seq).toBe((delivered.at(-1)?.seq ?? -1) + 1)
   })
 
-  it('runs the reassembly example the README documents against a live endpoint', { timeout: 60_000 }, async () => {
+  it('runs the compact turn collector through pages and verified chunks', { timeout: 60_000 }, async () => {
     const harness = await boot({
+      script: [textResponse('compact final answer')],
       config: { maxToolResultBytes: 8192, defaultChunkBytes: 2048, maxRequestBytes: 1 << 20 },
     })
-    // A payload that is both larger than the budget and multi-byte, so the
-    // example's chunk boundaries split code points.
     const hugeText = `${'汉字🙂'.repeat(6_000)}END`
-    const stored = await seedSession(harness, 'readme-example', (session) => {
-      userTurn(session, 'small first', 1)
-      session.append('turn/start', { turn: 2 })
-      session.append('user/message', createUserMessage({
-        content: [{ type: 'text', text: hugeText }],
-        source: { kind: 'user' },
-      }), { surfaceOp: 'append' })
-    })
-    const huge = stored.find(event => event.type === 'user/message'
-      && (event.data as { content: Array<{ text?: string }> }).content[0]?.text === hugeText)
-    if (huge === undefined) throw new Error('seeded huge event missing')
+    const client = await clientFor(harness)
+    const started = textJson(await client.callTool({
+      name: 'session_start',
+      arguments: {
+        cwd: harness.workspace,
+        prompt: hugeText,
+        session_id: 'collector-example',
+        request_id: 'collector-request',
+      },
+    }))
+    expect(started.accepted).toBe(true)
+    await harness.ctx.agents.get(SessionId('collector-example'))!.whenIdle()
 
-    // The documented example is executed verbatim, so the README cannot drift
-    // away from a script that works: the same base64 decoding, offset checks,
-    // length and digest verification, and JSON parse the reader is promised.
-    const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
-    const blocks = [...readme.matchAll(/```js\n([\s\S]*?)```/gu)].map(match => match[1] ?? '')
-    const example = blocks.find(block => block.includes('DSH_MCP_CONTROL_URL'))
-    if (example === undefined) throw new Error('the package README documents no runnable reassembly example')
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-control-readme-'))
-    const script = join(dir, 'reassemble.mjs')
-    await writeFile(script, example)
-    try {
-      const { stdout } = await promisify(execFile)(process.execPath, [script], {
-        env: {
-          DSH_MCP_CONTROL_URL: `${harness.baseUrl}/mcp`,
-          DSH_MCP_CONTROL_TOKEN: TEST_TOKEN,
-          DSH_MCP_CONTROL_SESSION_ID: 'readme-example',
-          DSH_MCP_CONTROL_AFTER_SEQ: String((huge.seq as number) - 1),
-        },
-      })
-      expect(JSON.parse(stdout)).toEqual(huge)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    const script = fileURLToPath(new URL('../examples/collect-turn.mjs', import.meta.url))
+    const { stdout } = await promisify(execFile)(process.execPath, [script], {
+      env: {
+        DSH_MCP_CONTROL_URL: `${harness.baseUrl}/mcp`,
+        DSH_MCP_CONTROL_TOKEN: TEST_TOKEN,
+        DSH_MCP_CONTROL_SESSION_ID: 'collector-example',
+        DSH_MCP_CONTROL_REQUEST_ID: 'collector-request',
+        DSH_MCP_CONTROL_TIMEOUT_MS: '10000',
+      },
+    })
+    expect(JSON.parse(stdout)).toMatchObject({
+      session_id: 'collector-example',
+      request_id: 'collector-request',
+      turn: 1,
+      final_message: 'compact final answer',
+      reason: { kind: 'completed' },
+      diagnostics: [],
+    })
+    expect(Buffer.byteLength(stdout)).toBeLessThan(512)
   })
 
   it('reports result-too-large when the page header alone cannot fit', { timeout: 30_000 }, async () => {

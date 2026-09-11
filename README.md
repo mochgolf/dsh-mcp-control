@@ -76,7 +76,7 @@ Every tool result carries the same object as `structuredContent` and as a `JSON.
 
 | Tool | Input | Result |
 |---|---|---|
-| `session_start` | `cwd`, `prompt`; optional `agent_preset`, `session_id`, `request_id` | `session_id`, `request_id`, `accepted`, resolved `cwd`, `workspace`, `agent_preset` |
+| `session_start` | `cwd`, `prompt`; optional `agent_preset`, `permission_preset`, `session_id`, `request_id` | `session_id`, `request_id`, `accepted`, resolved `cwd`, `workspace`, `agent_preset`, `permission_preset` |
 | `session_send` | `session_id`, `message`; optional `delivery` (`queue` or `steer`), `request_id` | `session_id`, `request_id`, `accepted` |
 | `session_cancel` | `session_id` | `session_id`, native `accepted` |
 | `agents_list` | `root_session_id` | `root_session_id`, native durable `entries` with `parentId` and `depth` |
@@ -84,7 +84,7 @@ Every tool result carries the same object as `structuredContent` and as a `JSON.
 | `child_interrupt` | `parent_session_id`, `child_session_id` | both ids, native `accepted` |
 | `events_read` | page or chunk request, below | page or chunk result, below |
 
-`session_start` expects the MCP client's actual project directory as `cwd`: that value selects DSH project context and Workspace grouping, while a temporary directory creates an ungrouped temporary context and does not enforce read-only access. It resolves `cwd` against the existing Workspace Registry before creation. An exact canonical-path match attaches the Session to that Workspace; an unregistered or unavailable directory keeps the Session ungrouped, and the endpoint never creates a Workspace. Omit `agent_preset` to use the deployment default; supply it only as an intentional override. The receipt reports the resolved `cwd`, attached `workspace` or `null`, and effective `agent_preset` or `null`, so a caller can detect a wrong context immediately. It adopts an existing Session when the supplied `session_id` already exists for that directory, and refuses a conflicting one. It chooses the Session id itself before calling DSH, so a create that outlives the call's deadline still reports that id in `details.session_id` with `stage: "create"`: the Session may exist, and reusing the reported id adopts it instead of starting a second one. Supplying `request_id` links a retry to the message the first attempt persisted, but it is correlation, not an exactly-once guarantee: the plugin never retries on its own. `agents_list` relays native entries unchanged, including diagnostic ones; its `activity: running` means the Session record is resident, not that a model is computing, and it is not a completion state.
+`session_start` expects the MCP client's actual project directory as `cwd`: that value selects DSH project context and Workspace grouping, while a temporary directory creates an ungrouped temporary context and does not enforce read-only access. It resolves `cwd` against the existing Workspace Registry before creation. An exact canonical-path match attaches the Session to that Workspace; an unregistered or unavailable directory keeps the Session ungrouped, and the endpoint never creates a Workspace. Omit `agent_preset` to use the deployment default; supply it only as an intentional override. Set `permission_preset` to one of the native names advertised by the tool schema when the new Session needs an explicit policy; for example, `read-only` confines access while keeping the real project `cwd`. The preset is validated before creation and applied before the first prompt. The receipt reports the resolved `cwd`, attached `workspace` or `null`, effective `agent_preset` or `null`, and effective `permission_preset`, so a caller can detect a wrong context immediately. It adopts an existing Session when the supplied `session_id` already exists for that directory, and refuses a conflicting one. It chooses the Session id itself before calling DSH, so a create that outlives the call's deadline still reports that id in `details.session_id` with `stage: "create"`: the Session may exist, and reusing the reported id adopts it instead of starting a second one. A `stage: "permission"` failure identifies a created Session whose prompt was not submitted. Supplying `request_id` links a retry to the message the first attempt persisted, but it is correlation, not an exactly-once guarantee: the plugin never retries on its own. `agents_list` relays native entries unchanged, including diagnostic ones; its `activity: running` means the Session record is resident, not that a model is computing, and it is not a completion state.
 
 ### Reading durable events
 
@@ -112,80 +112,17 @@ The client retrieves it through the same tool in chunk mode, concatenating base6
 
 `next_seq` never advances past an event that was not delivered whole, and the chunk result never advances the page cursor. A page that reports `oversized_event` therefore leaves `next_seq` at the caller's own `after_seq`; the client's cursor advances to the descriptor's `seq` only once the reassembled bytes verify. A requested `max_bytes` larger than the result budget is served as the largest chunk that budget admits, never as a reason to encode more of the event than the result can carry. A digest mismatch is refused as `mcp-control/event-changed`; the client re-reads the page for a fresh descriptor.
 
-This complete script — runnable with `DSH_MCP_CONTROL_URL`, `DSH_MCP_CONTROL_TOKEN`, `DSH_MCP_CONTROL_SESSION_ID`, and `DSH_MCP_CONTROL_AFTER_SEQ` set — performs that reassembly: it follows the page descriptor, checks every chunk's offset, verifies the total byte length and SHA-256 over the concatenated bytes, parses the recovered event, re-reads from the recovered event's own seq, and only then treats the event as delivered.
+The repository ships a compact collector at [`examples/collect-turn.mjs`](examples/collect-turn.mjs). Give it the `session_id` and `request_id` returned by `session_start` or `session_send`. It follows every page, verifies every oversized event before advancing, and prints only the target turn's final text, end reason, compact tool-failure diagnostics, and verified cursor. Raw reasoning, tool traces, and unrelated events never enter the caller's context. The exported `createSessionCollector` keeps its cursor private across successive request ids; the executable form starts at the protocol's initial `-1` cursor.
 
-```js
-import { createHash } from 'node:crypto'
-
-const url = process.env.DSH_MCP_CONTROL_URL
-const token = process.env.DSH_MCP_CONTROL_TOKEN
-const sessionId = process.env.DSH_MCP_CONTROL_SESSION_ID
-const cursor = Number(process.env.DSH_MCP_CONTROL_AFTER_SEQ ?? '-1')
-
-async function callTool(args) {
-  const answer = await fetch(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'events_read', arguments: args } }),
-  })
-  const text = await answer.text()
-  const data = text.split('\n').findLast(line => line.startsWith('data:'))
-  const message = JSON.parse(data === undefined ? text : data.slice('data:'.length))
-  if (message.result?.isError === true) throw new Error(JSON.stringify(message.result.structuredContent))
-  return message.result.structuredContent
-}
-
-const page = await callTool({
-  address: { kind: 'session', session_id: sessionId },
-  after_seq: cursor,
-  max_events: 128,
-})
-const descriptor = page.oversized_event
-if (descriptor === undefined) throw new Error('this cursor has no oversized event')
-if (page.next_seq >= descriptor.seq) throw new Error('the page advanced past an event it did not deliver')
-
-const blocks = []
-let offset = 0
-for (;;) {
-  const chunk = await callTool({
-    mode: 'chunk',
-    address: { kind: 'session', session_id: sessionId },
-    event_seq: descriptor.seq,
-    offset,
-    max_bytes: 65536,
-    sha256: descriptor.sha256,
-  })
-  if (chunk.offset !== offset) throw new Error(`chunk starts at ${chunk.offset}, expected ${offset}`)
-  const block = Buffer.from(chunk.data, 'base64')
-  blocks.push(block)
-  offset = chunk.next_offset
-  if (chunk.done) break
-}
-
-const bytes = Buffer.concat(blocks)
-if (bytes.byteLength !== descriptor.byte_length) {
-  throw new Error(`reassembled ${bytes.byteLength} bytes, expected ${descriptor.byte_length}`)
-}
-const digest = createHash('sha256').update(bytes).digest('hex')
-if (digest !== descriptor.sha256) throw new Error(`reassembled sha256 ${digest}, expected ${descriptor.sha256}`)
-
-// The event is complete and verified, so the client's own cursor becomes
-// descriptor.seq. page.next_seq still points at the previous event, because a
-// page never advances past one it did not deliver whole — continuing from it
-// would return this same descriptor again.
-const nextPage = await callTool({
-  address: { kind: 'session', session_id: sessionId },
-  after_seq: descriptor.seq,
-  max_events: 128,
-})
-if (nextPage.oversized_event?.seq === descriptor.seq) throw new Error('the cursor did not advance past the delivered event')
-
-console.log(JSON.stringify(JSON.parse(bytes.toString('utf8'))))
+```sh
+DSH_MCP_CONTROL_URL=http://127.0.0.1:8931/mcp \
+DSH_MCP_CONTROL_TOKEN=... \
+DSH_MCP_CONTROL_SESSION_ID=S \
+DSH_MCP_CONTROL_REQUEST_ID=R \
+node ./examples/collect-turn.mjs
 ```
+
+A successful result is compact JSON such as `{"session_id":"S","request_id":"R","turn":1,"final_message":"done","reason":{"kind":"completed"},"diagnostics":[],"next_seq":31,"head_seq":31}`. `DSH_MCP_CONTROL_POLL_MS` and `DSH_MCP_CONTROL_TIMEOUT_MS` optionally control polling and the overall wait.
 
 ### Failure codes
 
@@ -218,6 +155,7 @@ This section explains the design behind the endpoint and points at the code that
 | [`src/tools.ts`](src/tools.ts) | The seven tools and their native service calls |
 | [`src/events.ts`](src/events.ts) | `events_read` paging, byte budgets, and chunk reassembly |
 | [`src/result.ts`](src/result.ts) | Result, failure, and per-call deadline handling |
+| [`examples/collect-turn.mjs`](examples/collect-turn.mjs) | Compact final-answer collection with private cursor and verified chunks |
 | — | No runtime invariant companion is published: the plugin stores no durable or in-memory projection of its own, so every relationship it relays is already observable through the Session Controller, subagent runtime, and Session persistence it calls. |
 
 ### Request lifecycle

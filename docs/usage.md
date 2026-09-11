@@ -49,8 +49,8 @@ The client lists seven tools: `session_start`, `session_send`, `session_cancel`,
 A first check confirms the endpoint serves only the seven tools and that a Session reaches disk:
 
 1. The client completes the MCP handshake against `http://127.0.0.1:8931/mcp` and `tools/list` returns exactly the seven tools above.
-2. `session_start` with the client's actual project directory as `cwd` and a prompt returns `session_id` and `accepted: true` immediately, before the turn finishes; when that path already belongs to a Workspace, the new Session appears there, while any other path remains ungrouped. Omit `agent_preset` to use the deployment default, then check the returned `cwd`, `workspace`, and `agent_preset` before coordinating more work.
-3. `events_read` for that id returns a page whose `events` include the native `turn/start` and `agent/inbox/spliced` records, and repeating the read returns the same events.
+2. `session_start` with the client's actual project directory as `cwd` and a prompt returns `session_id` and `accepted: true` immediately, before the turn finishes; when that path already belongs to a Workspace, the new Session appears there, while any other path remains ungrouped. Omit `agent_preset` to use the deployment default. Set `permission_preset: "read-only"` when the Session must inspect that real project without writing, then check the returned `cwd`, `workspace`, `agent_preset`, and `permission_preset` before coordinating more work.
+3. Run `examples/collect-turn.mjs` with the returned Session and request ids. It follows `events_read` pages and chunks and returns the final answer without copying the raw reasoning and tool trace into the controlling client's context.
 4. Let the model create a child through its own subagent tool, then `agents_list` shows that child with its `parentId` and `depth`.
 5. `child_send` returns a `message_id`, and the child's own log shows the message and its answer after the delivery.
 6. Restart the DSH process with the same `DSH_HOME`: `events_read` still returns the committed events and `agents_list` still lists the child.

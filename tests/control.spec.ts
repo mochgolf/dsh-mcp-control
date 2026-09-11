@@ -123,8 +123,60 @@ describe('session_start', () => {
       cwd: harness.workspace,
       workspace: { id: workspace.id, title: workspace.title },
       agent_preset: null,
+      permission_preset: 'workspace-write',
     })
-    expect(ungrouped).toMatchObject({ cwd: harness.persistenceRoot, workspace: null, agent_preset: null })
+    expect(ungrouped).toMatchObject({
+      cwd: harness.persistenceRoot,
+      workspace: null,
+      agent_preset: null,
+      permission_preset: 'workspace-write',
+    })
+  })
+
+  it('applies a native permission preset before the first prompt', { timeout: 30_000 }, async () => {
+    const harness = await boot({ script: [textResponse('read only')] })
+    const client = await clientFor(harness)
+    const set = vi.spyOn(harness.ctx.permissionPresets, 'set')
+    const prompt = vi.spyOn(harness.ctx.sessionController, 'prompt')
+    const started = await call(client, 'session_start', {
+      cwd: harness.workspace,
+      prompt: 'inspect without writing',
+      permission_preset: 'read-only',
+      session_id: 'root-read-only',
+    })
+    const session = harness.ctx.sessions.get(SessionId('root-read-only'))
+    if (session === undefined) throw new Error('the read-only session is missing')
+
+    expect(started.permission_preset).toBe('read-only')
+    expect(harness.ctx.permissionPresets.current(session)).toBe('read-only')
+    expect(set).toHaveBeenCalledWith(session, 'read-only')
+    expect(set.mock.invocationCallOrder[0]).toBeLessThan(prompt.mock.invocationCallOrder[0] ?? 0)
+  })
+
+  it('reports a permission-stage failure without submitting the prompt', { timeout: 30_000 }, async () => {
+    const harness = await boot()
+    const client = await clientFor(harness)
+    vi.spyOn(harness.ctx.permissionPresets, 'set').mockImplementationOnce(() => {
+      throw new Error('permission write failed')
+    })
+    const prompt = vi.spyOn(harness.ctx.sessionController, 'prompt')
+    const failure = await callFailure(client, 'session_start', {
+      cwd: harness.workspace,
+      prompt: 'must not run',
+      permission_preset: 'read-only',
+      session_id: 'root-permission-failure',
+      request_id: 'permission-failure',
+    })
+
+    expect(failure).toMatchObject({
+      code: 'mcp-control/internal',
+      details: {
+        session_id: 'root-permission-failure',
+        request_id: 'permission-failure',
+        stage: 'permission',
+      },
+    })
+    expect(prompt).not.toHaveBeenCalled()
   })
 
   it('answers with a receipt while the turn is still running', { timeout: 30_000 }, async () => {
@@ -245,6 +297,7 @@ describe('session_start', () => {
       { cwd: 'relative/dir', prompt: 'x' },
       { cwd: harness.workspace, prompt: '   ' },
       { cwd: harness.workspace, prompt: 'x', session_id: '' },
+      { cwd: harness.workspace, prompt: 'x', permission_preset: 'unknown' },
       { cwd: harness.workspace, prompt: 'x', extra: true },
       { cwd: harness.workspace },
     ]) {

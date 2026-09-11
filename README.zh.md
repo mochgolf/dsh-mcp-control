@@ -76,7 +76,7 @@ tool_timeout_sec = 30
 
 | 工具 | 输入 | 结果 |
 |---|---|---|
-| `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset` |
+| `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset` |
 | `session_send` | `session_id`、`message`；可选 `delivery`（`queue` 或 `steer`）、`request_id` | `session_id`、`request_id`、`accepted` |
 | `session_cancel` | `session_id` | `session_id`、原生 `accepted` |
 | `agents_list` | `root_session_id` | `root_session_id`、带 `parentId` 与 `depth` 的原生 durable `entries` |
@@ -84,7 +84,7 @@ tool_timeout_sec = 30
 | `child_interrupt` | `parent_session_id`、`child_session_id` | 两个 id、原生 `accepted` |
 | `events_read` | 下文的分页或分片请求 | 下文的分页或分片结果 |
 
-`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）与实际 `agent_preset`（否则为 `null`），调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
+`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
 
 ### 读取 durable 事件
 
@@ -112,80 +112,17 @@ tool_timeout_sec = 30
 
 `next_seq` 绝不会越过没有完整交付的事件，分片结果也绝不推进分页游标。因此返回 `oversized_event` 的分页会把 `next_seq` 留在调用方自己的 `after_seq` 上；只有当重组出的字节通过校验后，客户端游标才推进到 descriptor 的 `seq`。请求的 `max_bytes` 若大于结果预算，会按该预算允许的最大分片返回，而不会成为编码超过结果可承载范围的理由。摘要不符以 `mcp-control/event-changed` 拒绝；客户端重新读取分页以获得新的 descriptor。
 
-下面这段完整脚本可用 `DSH_MCP_CONTROL_URL`、`DSH_MCP_CONTROL_TOKEN`、`DSH_MCP_CONTROL_SESSION_ID` 与 `DSH_MCP_CONTROL_AFTER_SEQ` 直接运行，完成上述重组：跟随分页 descriptor、校验每个分片的 offset、对拼接后的字节校验总长度与 SHA-256、解析恢复出的事件、从恢复出的事件自身 seq 继续读取，只有到这一步才把该事件视为已交付。
+仓库随附紧凑收集器 [`examples/collect-turn.mjs`](examples/collect-turn.mjs)。把 `session_start` 或 `session_send` 返回的 `session_id` 与 `request_id` 交给它；它会遍历所有分页、在推进前校验每个超大事件，并且只输出目标轮次的最终文本、结束原因、紧凑的工具失败诊断和可信游标。原始 reasoning、工具轨迹与无关事件不会进入调用方上下文。导出的 `createSessionCollector` 会在连续的 request id 之间私有保存游标；直接执行时从协议规定的初始游标 `-1` 开始。
 
-```js
-import { createHash } from 'node:crypto'
-
-const url = process.env.DSH_MCP_CONTROL_URL
-const token = process.env.DSH_MCP_CONTROL_TOKEN
-const sessionId = process.env.DSH_MCP_CONTROL_SESSION_ID
-const cursor = Number(process.env.DSH_MCP_CONTROL_AFTER_SEQ ?? '-1')
-
-async function callTool(args) {
-  const answer = await fetch(url, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'events_read', arguments: args } }),
-  })
-  const text = await answer.text()
-  const data = text.split('\n').findLast(line => line.startsWith('data:'))
-  const message = JSON.parse(data === undefined ? text : data.slice('data:'.length))
-  if (message.result?.isError === true) throw new Error(JSON.stringify(message.result.structuredContent))
-  return message.result.structuredContent
-}
-
-const page = await callTool({
-  address: { kind: 'session', session_id: sessionId },
-  after_seq: cursor,
-  max_events: 128,
-})
-const descriptor = page.oversized_event
-if (descriptor === undefined) throw new Error('this cursor has no oversized event')
-if (page.next_seq >= descriptor.seq) throw new Error('the page advanced past an event it did not deliver')
-
-const blocks = []
-let offset = 0
-for (;;) {
-  const chunk = await callTool({
-    mode: 'chunk',
-    address: { kind: 'session', session_id: sessionId },
-    event_seq: descriptor.seq,
-    offset,
-    max_bytes: 65536,
-    sha256: descriptor.sha256,
-  })
-  if (chunk.offset !== offset) throw new Error(`chunk starts at ${chunk.offset}, expected ${offset}`)
-  const block = Buffer.from(chunk.data, 'base64')
-  blocks.push(block)
-  offset = chunk.next_offset
-  if (chunk.done) break
-}
-
-const bytes = Buffer.concat(blocks)
-if (bytes.byteLength !== descriptor.byte_length) {
-  throw new Error(`reassembled ${bytes.byteLength} bytes, expected ${descriptor.byte_length}`)
-}
-const digest = createHash('sha256').update(bytes).digest('hex')
-if (digest !== descriptor.sha256) throw new Error(`reassembled sha256 ${digest}, expected ${descriptor.sha256}`)
-
-// The event is complete and verified, so the client's own cursor becomes
-// descriptor.seq. page.next_seq still points at the previous event, because a
-// page never advances past one it did not deliver whole — continuing from it
-// would return this same descriptor again.
-const nextPage = await callTool({
-  address: { kind: 'session', session_id: sessionId },
-  after_seq: descriptor.seq,
-  max_events: 128,
-})
-if (nextPage.oversized_event?.seq === descriptor.seq) throw new Error('the cursor did not advance past the delivered event')
-
-console.log(JSON.stringify(JSON.parse(bytes.toString('utf8'))))
+```sh
+DSH_MCP_CONTROL_URL=http://127.0.0.1:8931/mcp \
+DSH_MCP_CONTROL_TOKEN=... \
+DSH_MCP_CONTROL_SESSION_ID=S \
+DSH_MCP_CONTROL_REQUEST_ID=R \
+node ./examples/collect-turn.mjs
 ```
+
+成功结果是紧凑 JSON，例如 `{"session_id":"S","request_id":"R","turn":1,"final_message":"done","reason":{"kind":"completed"},"diagnostics":[],"next_seq":31,"head_seq":31}`。可用 `DSH_MCP_CONTROL_POLL_MS` 与 `DSH_MCP_CONTROL_TIMEOUT_MS` 调整轮询间隔和总等待时间。
 
 ### 失败码
 
@@ -218,6 +155,7 @@ console.log(JSON.stringify(JSON.parse(bytes.toString('utf8'))))
 | [`src/tools.ts`](src/tools.ts) | 七个工具及其原生服务调用 |
 | [`src/events.ts`](src/events.ts) | `events_read` 分页、字节预算与分片重组 |
 | [`src/result.ts`](src/result.ts) | 结果、失败与单次调用截止时间处理 |
+| [`examples/collect-turn.mjs`](examples/collect-turn.mjs) | 使用私有游标和已校验分片收集紧凑最终答案 |
 | — | 不发布运行时 invariant 伴随包：该插件不保存任何自己的持久化或内存投影，因此它转发的每种关系都已经可以通过它调用的 Session Controller、subagent 运行时与会话持久化观察到。 |
 
 ### 请求生命周期

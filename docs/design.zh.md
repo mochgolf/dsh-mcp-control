@@ -16,17 +16,19 @@ Session Controller 与 subagent 运行时已经拥有这类客户端所需的全
 
 一个可选插件 `@mochgolf/dsh-mcp-control`，设计为通过 patch overlay（`examples/cordis.yml`）加载进 DSH Web profile。它经 `ctx.effect(() => ctx.webServer.register(...))` 在共享的 `ctx.webServer` 上注册一条精确路由。没有 daemon、没有第二个 `createServer()`、没有私有 wire client，也没有 stdout scraping；路由跟随 Web 实例自身的 host 与 port，当该绑定不是 loopback 时加载失败。
 
-插件注入 `webServer`、`sessionController`、`subagents`、`credentials` 与 `workspaceRegistry`。它不发布 `./invariant` 伴随包：它不持有任何可能被独立观察出分歧的持久化或内存投影，因此它转发的每种关系都已经在 DSH 拥有它们的地方可观察。
+插件注入 `webServer`、`sessionController`、`subagents`、`credentials`、`workspaceRegistry`、`sessions` 与 `permissionPresets`。它不发布 `./invariant` 伴随包：它不持有任何可能被独立观察出分歧的持久化或内存投影，因此它转发的每种关系都已经在 DSH 拥有它们的地方可观察。
 
 ### 七个工具，没有任务状态
 
-`session_start`、`session_send`、`session_cancel`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read` 使用拥有相应效果的 Session Controller 与 subagent 方法。`child_send` 使用 `ctx.subagents.prompt` 并固定 `mode: continuable`，`child_interrupt` 使用 `interruptByParent`，因此 live direct parent 要求与 parent 授权校验留在已经实施它们的服务中。`agents_list` 原样转发原生 durable 条目（含 diagnostic），且从不重编号。`session_start` 接受的 `cwd` 与平台自身判定为绝对路径的取值完全一致，用的就是 Session header 校验 `cwd` 的同一个 `node:path` 谓词，因此 Windows 盘符根路径或 UNC 路径会被接受，而不是被 POSIX 前缀判断拒绝。它通过 `workspaceRegistry.resolveByPath` 查询现有的规范路径所有者，再把该工作区 id 交给 Session Controller；查询未命中或路径解析失败时仍走原来的 `cwd` 路径，而且不会创建工作区。回执会暴露解析后的目录、工作区身份及 Session Controller 返回的 Agent preset，客户端可在后续调用前核对上下文。它还在调用 `create` 之前自行选定会话 id，因为超过本次调用截止时间的 create 仍可能完成：否则客户端手里没有任何办法寻址该会话——接口没有枚举能力，重试还会再建一个。
+`session_start`、`session_send`、`session_cancel`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read` 使用拥有相应效果的 Session Controller、Permission Preset 与 subagent 方法。`child_send` 使用 `ctx.subagents.prompt` 并固定 `mode: continuable`，`child_interrupt` 使用 `interruptByParent`，因此 live direct parent 要求与 parent 授权校验留在已经实施它们的服务中。`agents_list` 原样转发原生 durable 条目（含 diagnostic），且从不重编号。`session_start` 接受的 `cwd` 与平台自身判定为绝对路径的取值完全一致，用的就是 Session header 校验 `cwd` 的同一个 `node:path` 谓词，因此 Windows 盘符根路径或 UNC 路径会被接受，而不是被 POSIX 前缀判断拒绝。它通过 `workspaceRegistry.resolveByPath` 查询现有的规范路径所有者，再把该工作区 id 交给 Session Controller；查询未命中或路径解析失败时仍走原来的 `cwd` 路径，而且不会创建工作区。可选的 `permission_preset` 会在创建前按部署提供的原生名称校验，并在已发布会话收到首条提示词之前应用。回执会暴露解析后的目录、工作区身份、Agent preset 与实际 permission preset，客户端可在后续调用前核对上下文。它还在调用 `create` 之前自行选定会话 id，因为超过本次调用截止时间的 create 仍可能完成：否则客户端手里没有任何办法寻址该会话——接口没有枚举能力，重试还会再建一个。
 
 每个回执报告的都是原生服务报告的内容。`accepted: true` 意味着 DSH 接收了工作；它绝不意味着某个轮次已结束、队列顺序得到承诺，或某个 child 已经存在。插件从不重试、从不保存 job、从不把 session 映射为 task，也从不创建 child——模型自己的 subagent 工具负责创建，端点只观察结果。
 
 ### 无损读取不新增工具
 
 `events_read` 从调用方的 `after_seq` 向前分页，而这是唯一存在的游标：插件在请求之间不保留 listener、snapshot 或缓存，因此端点重启不会改变客户端续读的方式。每页以完整的 `CallToolResult` 字节预算为界，交付能够容纳的最大连续前缀，并停在读取开始时取得的水位。单个事件大到装不进一个结果时，以 `oversized_event` 连同字节长度与 SHA-256 报告，并用同一个工具的 `chunk` 模式取回；该模式绝不推进分页游标，客户端游标在重组出的字节通过校验后才移到 descriptor 的 `seq`，因为 `next_seq` 会有意停在调用方自身的位置。请求的 `max_bytes` 大于结果预算时，按该预算允许的最大分片返回：base64 与 JSON 在任何尺寸被测量之前就会分配数倍于切片的字节，因此预算必须约束读取本身，而不只是约束最终答案。除 SDK 自身的输入校验之外，工具 schema 还实施地址、游标与摘要规则。
+
+随包提供的 `examples/collect-turn.mjs` 是客户端消费该协议的参考实现，避免让原始事件占满协调端上下文。它私有保存初始游标或上一次已校验游标，只跟随服务端的 `next_seq`，仅在长度与摘要校验通过后越过超大 descriptor，把已接收的 `request_id` 关联到对应轮次，并且只返回最后一条 assistant 文本、轮次结束原因、紧凑的工具失败事实和游标。
 
 ### 配置与防护
 
@@ -62,4 +64,4 @@ bearer token 等同于该实例可按 id 寻址的每个会话的完整控制权
 
 ## Testing
 
-包内测试让端点跑在真实 Agent Loop、Session Controller、subagent 运行时、JSONL 持久化与共享 WebServer 上，覆盖防护、凭据轮换、卸载与重载、Agent 运行中的重载、七个工具的成功与拒绝路径、游标语义、字节预算与分片重组。配置用例断言加载期的拒绝，包括 WebServer 永远匹配不到的路由路径、计时器永远无法调度的超时，以及任何请求都无法呈现的凭据；另有一个用例用平台谓词能够区分的各种拼写驱动 `session_start`，把该工具的判断在每个平台上都钉在 `node:path.isAbsolute` 上，还有一个用例证明超过截止时间的 create 仍会报告 DSH 实际收到的那个 id、且该会话确实落在该 id 下。分片大小上界既有直接断言，也有端到端断言：不受限的 `max_bytes` 返回的正是结果预算允许的那个分片。卸载针对「响应读到一半就不再读取」的客户端做了证明：写入触发背压，卸载仍能完成，共享监听器继续服务其它路由，全程运行的 Agent 未受影响。结果预算经 HTTP 在允许的最小预算下验证，覆盖多字节与大量转义字符的关联值、被切在代理对中间的诊断，以及比整个预算还长的未知参数名；README 公布的重组示例直接从该 README 中提取并对真实端点执行。随包发布的 Web profile 通过官方 MCP 客户端经 HTTP 做端到端验证，并新增录制会话快照（`snapshots/web/mcp-control/`），用真实 `dsh web` profile 驱动端点：根会话、由模型原生创建的 continuable child、向 child 投递、原始工具事件、重连后的游标续读，以及独立的 `workspace.expected/` 核验，全部以无密钥回放执行。重启用例证明已提交日志仍可读、冷 parent 被拒绝、parent 经原生方式恢复后 child 重新可控；真实模型用例覆盖文件写入任务、原生创建 child 与向 child 投递。
+包内测试让端点跑在真实 Agent Loop、Session Controller、subagent 运行时、JSONL 持久化与共享 WebServer 上，覆盖防护、凭据轮换、卸载与重载、Agent 运行中的重载、七个工具的成功与拒绝路径、游标语义、字节预算与分片重组。配置用例断言加载期的拒绝，包括 WebServer 永远匹配不到的路由路径、计时器永远无法调度的超时，以及任何请求都无法呈现的凭据；另有一个用例用平台谓词能够区分的各种拼写驱动 `session_start`，把该工具的判断在每个平台上都钉在 `node:path.isAbsolute` 上，一个用例证明超过截止时间的 create 仍会报告 DSH 实际收到的那个 id、且该会话确实落在该 id 下，权限用例则证明 preset 会在 prompt 接收前完成校验与应用。分片大小上界既有直接断言，也有端到端断言：不受限的 `max_bytes` 返回的正是结果预算允许的那个分片。卸载针对「响应读到一半就不再读取」的客户端做了证明：写入触发背压，卸载仍能完成，共享监听器继续服务其它路由，全程运行的 Agent 未受影响。结果预算经 HTTP 在允许的最小预算下验证，覆盖多字节与大量转义字符的关联值、被切在代理对中间的诊断，以及比整个预算还长的未知参数名。紧凑收集器会对带有多字节超大事件的真实端点运行，并且必须只返回最终答案与诊断。随包发布的 Web profile 通过官方 MCP 客户端经 HTTP 做端到端验证，并新增录制会话快照（`snapshots/web/mcp-control/`），用真实 `dsh web` profile 驱动端点：根会话、由模型原生创建的 continuable child、向 child 投递、原始工具事件、重连后的游标续读，以及独立的 `workspace.expected/` 核验，全部以无密钥回放执行。重启用例证明已提交日志仍可读、冷 parent 被拒绝、parent 经原生方式恢复后 child 重新可控；真实模型用例覆盖文件写入任务、原生创建 child 与向 child 投递。

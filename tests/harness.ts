@@ -17,6 +17,7 @@ import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-permission-presets'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -140,6 +141,29 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
       resolveByPath: async (path: string) => registeredWorkspace?.path === path ? registeredWorkspace : undefined,
       get: (id: string) => registeredWorkspace?.id === id ? registeredWorkspace : undefined,
       list: () => registeredWorkspace === undefined ? [] : [registeredWorkspace],
+    } as never)
+
+    const permissionBySession = new WeakMap<Session, string>()
+    const permissionSpecs = {
+      'read-only': { sandbox: 'read-only', approval: 'ask' },
+      'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+      'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+    } as const
+    const resolvePermission = (name: string) => {
+      const spec = permissionSpecs[name as keyof typeof permissionSpecs]
+      if (spec === undefined) throw new Error(`unknown test permission preset: ${name}`)
+      return spec
+    }
+    ctx.provide('permissionPresets', {
+      names: Object.keys(permissionSpecs),
+      resolve: resolvePermission,
+      current(session: Session) {
+        return permissionBySession.get(session) ?? 'workspace-write'
+      },
+      set(session: Session, name: string) {
+        resolvePermission(name)
+        permissionBySession.set(session, name)
+      },
     } as never)
 
     // The Service constructor registers `sessionController` on this context.

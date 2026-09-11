@@ -13,6 +13,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-permission-presets'
+import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type {} from '@deepseek-ai/dsh-workspace'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
@@ -35,7 +37,15 @@ import { createControlServer } from './tools.ts'
 /** Cordis function-plugin name. */
 export const name = 'mcp-control'
 /** Host services required before the endpoint can register. */
-export const inject = ['webServer', 'sessionController', 'subagents', 'credentials', 'workspaceRegistry']
+export const inject = [
+  'webServer',
+  'sessionController',
+  'subagents',
+  'credentials',
+  'workspaceRegistry',
+  'sessions',
+  'permissionPresets',
+]
 
 export { Config } from './config.ts'
 

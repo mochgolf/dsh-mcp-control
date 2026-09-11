@@ -58,6 +58,7 @@ const startReceiptSchema = promptReceiptSchema.extend({
   cwd: z.string(),
   workspace: z.object({ id: z.string(), title: z.string() }).nullable(),
   agent_preset: z.string().nullable(),
+  permission_preset: z.string(),
 })
 
 /** Mint the client correlation identity when the caller did not supply one. */
@@ -79,6 +80,8 @@ function textContent(text: string): [{ type: 'text'; text: string }] {
 
 /** Register `session_start`: create or adopt a root session, then submit one prompt. */
 function registerSessionStart(server: McpServer, deps: ControlDeps): void {
+  const permissionPresetSchema = z.enum(deps.ctx.permissionPresets.names)
+    .describe(`Native DSH permission preset applied before the first prompt. Available: ${deps.ctx.permissionPresets.names.join(', ')}.`)
   server.registerTool(
     'session_start',
     {
@@ -88,14 +91,17 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         + 'cwd selects project context and Workspace grouping; using a temporary directory creates an ungrouped temporary context and does not enforce read-only access. '
         + 'If the directory belongs to a registered DSH workspace, attach the session there; otherwise leave it ungrouped. '
         + 'Omit agent_preset to use the deployment\'s configured default; set it only as an intentional, known override. '
+        + 'Set permission_preset to a native DSH preset such as "read-only"; it is applied before the first prompt, while cwd still names the real project. '
         + 'Returns once DSH accepts the prompt and never waits for the turn to finish. '
         + 'Reusing the same request_id links a retry to the message the first attempt persisted. '
-        + 'A failure that reports stage "create" still carries the session_id it tried to create, so a retry can adopt that id instead of creating a second session.',
+        + 'A failure that reports stage "create" still carries the session_id it tried to create, so a retry can adopt that id instead of creating a second session. '
+        + 'A stage "permission" failure identifies a created Session whose prompt was not submitted.',
       inputSchema: boundedInputSchema(deps, 'session_start', z.strictObject({
         cwd: cwdSchema,
         prompt: messageBody,
         agent_preset: z.string().min(1).max(256).optional()
           .describe('Explicit DSH Agent preset override. Omit it to use the deployment default.'),
+        permission_preset: permissionPresetSchema.optional(),
         session_id: opaqueId.optional(),
         request_id: requestIdSchema.optional(),
       })),
@@ -113,6 +119,7 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       let resolvedCwd = args.cwd
       let workspaceReceipt: { id: string; title: string } | null = null
       let agentPreset: string | null = null
+      let permissionPreset: string
       try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         const workspace = await withinDeadline(
@@ -137,6 +144,16 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       }
       const correlation = { session_id: sessionId, request_id: requestId }
       try {
+        guard.signal.throwIfAborted()
+        const session = deps.ctx.sessions.get(sessionId)!
+        if (args.permission_preset !== undefined) {
+          deps.ctx.permissionPresets.set(session, args.permission_preset)
+        }
+        permissionPreset = deps.ctx.permissionPresets.current(session)
+      } catch (error: unknown) {
+        return failureResult(deps, error, guard.signal, { ...correlation, stage: 'permission' })
+      }
+      try {
         await withinDeadline(deps.ctx.sessionController.prompt({
           requestId,
           sessionId,
@@ -155,6 +172,7 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         cwd: resolvedCwd,
         workspace: workspaceReceipt,
         agent_preset: agentPreset,
+        permission_preset: permissionPreset,
       })
     },
   )
