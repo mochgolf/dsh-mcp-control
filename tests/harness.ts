@@ -138,6 +138,7 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
         }
       : undefined
     ctx.provide('workspaceRegistry', {
+      archivedSessionIds: [],
       resolveByPath: async (path: string) => registeredWorkspace?.path === path ? registeredWorkspace : undefined,
       get: (id: string) => registeredWorkspace?.id === id ? registeredWorkspace : undefined,
       list: () => registeredWorkspace === undefined ? [] : [registeredWorkspace],

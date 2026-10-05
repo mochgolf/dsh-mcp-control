@@ -77,12 +77,13 @@ async function failure(
  * so the seeded log never needs the reader's unterminated-turn repair.
  * @returns the seq of the appended human message.
  */
-function userTurn(session: Session, text: string, turn: number): SessionSeqType {
+function userTurn(session: Session, text: string, turn: number, withinTurn?: () => void): SessionSeqType {
   session.append('turn/start', { turn })
   const message = session.append('user/message', createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
+  withinTurn?.()
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
   return message.seq
 }
@@ -193,8 +194,7 @@ describe('events_read paging', () => {
     const stored = await seedSession(harness, 'dense-log', (session) => {
       let earlier = SessionSeq(0)
       for (let turn = 1; turn <= 12; turn += 1) {
-        earlier = userTurn(session, `message ${String(turn)}`, turn)
-        fill(session, 5, 'mock')
+        earlier = userTurn(session, `message ${String(turn)}`, turn, () => fill(session, 5, 'mock'))
         if (turn % 4 === 0) {
           session.append('user/message', createUserMessage({
             content: [{ type: 'text', text: `summary of ${String(turn)}` }],
@@ -216,8 +216,7 @@ describe('events_read paging', () => {
     const client = await clientFor(harness)
     const stored = await seedSession(harness, 'old-cursor', (session) => {
       for (let turn = 1; turn <= 40; turn += 1) {
-        userTurn(session, `message ${String(turn)}`, turn)
-        fill(session, 3, 'mock')
+        userTurn(session, `message ${String(turn)}`, turn, () => fill(session, 3, 'mock'))
       }
     })
     const head = stored.length - 1
@@ -277,8 +276,7 @@ describe('events_read paging', () => {
     const harness = await boot()
     const client = await clientFor(harness)
     await seedSession(harness, 'cold-read', (session) => {
-      userTurn(session, 'stored only', 1)
-      fill(session, 3, 'mock')
+      userTurn(session, 'stored only', 1, () => fill(session, 3, 'mock'))
     })
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const answer = await page(client, 'cold-read', { after_seq: -1 })
@@ -321,10 +319,11 @@ describe('events_read oversized events', () => {
         content: [{ type: 'text', text: HUGE_TEXT }],
         source: { kind: 'user' },
       }), { surfaceOp: 'append' })
+      session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
       userTurn(session, 'small last', 3)
     })
     const huge = stored.find(event => event.type === 'user/message'
-      && (event.data as { content: Array<{ text?: string }> }).content[0]?.text === HUGE_TEXT)
+      && (event.data as { content: readonly { text?: string }[] }).content[0]?.text === HUGE_TEXT)
     if (huge === undefined) throw new Error('seeded huge event missing')
     const hex = createHash('sha256').update(Buffer.from(JSON.stringify(huge), 'utf8')).digest('hex')
 
@@ -677,9 +676,18 @@ describe('events_read cost at scale', () => {
     const count = 100_000
     const events: SessionEvent[] = []
     for (let index = 0; index < count; index += 1) {
-      // One message every 500 events: the far-cursor case the point read must
-      // still cover without walking pages backwards.
-      if (index % 500 === 0) {
+      // Keep one open turn while placing a message every 500 events, so the
+      // native V4 reader accepts the large log used to probe far cursors.
+      if (index === 0 || index === count - 1) {
+        events.push({
+          type: index === 0 ? 'turn/start' : 'turn/end',
+          seq: SessionSeq(index),
+          time: 1_700_000_000_000 + index,
+          data: index === 0 ? { turn: 1 } : { turn: 1, reason: { kind: 'completed' } },
+        } as SessionEvent)
+        continue
+      }
+      if (index % 500 === 1) {
         events.push({
           type: 'user/message',
           seq: SessionSeq(index),

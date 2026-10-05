@@ -6,7 +6,7 @@
 
 该端点只是 Session Controller 与 subagent 服务之上的薄转发层。它不启动第二个监听器、不启动 daemon、不保存任务数据库，也不注册任何模型可见的内容。
 
-本仓库以 DSH `0.1.5-rc.2` 为兼容测试基线。当前发布版 DSH 的 resolver 尚不能加载这个外部包；下方命令适用于 DSH 完成这项最小接入之后。
+本仓库以 DSH `0.2.0-rc.2` 为兼容测试基线。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件。
 
 ## 启用
 

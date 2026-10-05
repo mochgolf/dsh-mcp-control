@@ -247,7 +247,7 @@ function registerAgentsList(server: McpServer, deps: ControlDeps): void {
     {
       title: 'List a session subagent tree',
       description:
-        'List every durable descendant of a root DSH session as native entries, each carrying its durable direct parent id and root-relative depth. '
+        'List the catalog-reachable durable descendants of a root DSH session as native entries, each carrying its durable direct parent id and root-relative depth. '
         + 'Native diagnostic entries are relayed unchanged and never renumbered. activity "running" means the session record is resident, not that a model is computing, '
         + 'and it is never a completion state. No child is resumed, restored, or repaired by this call.',
       inputSchema: boundedInputSchema(deps, 'agents_list', z.strictObject({ root_session_id: opaqueId })),

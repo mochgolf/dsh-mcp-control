@@ -11,7 +11,7 @@ kind: "package-reference"
 
 `dsh-mcp-control` 在 DSH Web 监听器上提供 Model Context Protocol 服务，使同一台机器上的 MCP 客户端可以按 id 驱动它已经知道的会话。七个工具用于创建或采用根会话、提交与取消其工作、列出其 durable subagent 树、向 continuable child 投递消息，以及读取 durable 事件日志。每次调用都使用原生 Session Controller、subagent 运行时与 Workspace Registry：该端点不拥有任务状态、不启动第二个监听器、不注册任何面向模型的工具，也从不代替用户回答审批。部署方主动插入该插件，其 bearer token 等同于对该实例可寻址的每个会话的完整控制权。
 
-本仓库以 DSH `0.1.5-rc.2` 为兼容测试基线。当前发布版 DSH 的 resolver 尚不能加载这个外部包；DSH 增加外部插件解析后，下方 overlay 才能直接使用。本仓库不会修改已安装的 DSH runtime。
+本仓库以 DSH `0.2.0-rc.2` 为兼容测试基线。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件，无需修改 DSH runtime。
 
 ## 目录
 
@@ -84,7 +84,7 @@ tool_timeout_sec = 30
 | `child_interrupt` | `parent_session_id`、`child_session_id` | 两个 id、原生 `accepted` |
 | `events_read` | 下文的分页或分片请求 | 下文的分页或分片结果 |
 
-`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
+`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
 
 ### 读取 durable 事件
 
