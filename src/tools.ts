@@ -59,7 +59,7 @@ const promptReceiptSchema = z.object({
   accepted: z.literal(true),
 })
 
-/** `session_start` receipt with the project context DSH actually selected. */
+/** A Workspace as receipts name it. */
 const workspaceRefSchema = z.object({ id: z.string(), title: z.string() })
 
 /** One advisory about the context the Session was started in; the start itself succeeded. */
@@ -69,6 +69,7 @@ const warningSchema = z.object({
   paths: z.array(z.string()).optional(),
 })
 
+/** `session_start` receipt with the project context DSH actually selected. */
 const startReceiptSchema = promptReceiptSchema.extend({
   cwd: z.string(),
   workspace: workspaceRefSchema.nullable(),
