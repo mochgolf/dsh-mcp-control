@@ -160,7 +160,7 @@ tool_timeout_sec = 30
 - **端点不拥有状态。** 会话、subagent 关系、inbox 与事件日志属于 Session Controller、subagent 运行时与会话持久化。插件只持有一个路由注册、MCP SDK handler，以及干净卸载所需的请求生命周期句柄。
 - **单一监听器。** 路由通过 `ctx.effect(() => ctx.webServer.register(...))` 注册到共享的 `ctx.webServer`；不存在第二个 `createServer()`、没有 daemon，也没有私有 wire client。
 - **原生权威做决定。** `child_send` 经 `ctx.subagents.prompt` 并使用 `mode: continuable`，`child_interrupt` 经 `interruptByParent`，因此 live direct parent 要求与寻址校验留在 DSH 已经实施它们的地方。端点从不恢复 parent、从不列出它无法寻址的对象，也不重编号原生条目。
-- **卸载会结束本插件的请求。** 释放时注销路由、中止插件自身的 signal、结束仍在进行中的每个请求——正在接收的请求体，以及 SDK 仍在向停止读取的客户端写入的响应，都会因此结算——然后等待这些请求并关闭 SDK handler。结束请求只会断开它的连接；它不撤销 DSH 已经接收的工作，也不关闭共享 WebServer、不 dispose Session Controller，也不停止任何 Agent。
+- **卸载会结束本插件的请求。** 释放时注销路由、中止插件自身的 signal、结束仍在进行中的每个请求——正在接收的请求体，以及 SDK 仍在向停止读取的客户端写入的响应，都会因此结算——然后等待这些请求并关闭 SDK handler。结束请求会以 TCP RST 重置它的连接，而不是优雅关闭，因为优雅关闭会让操作系统（尤其是 Windows）在端点消失之后继续发送已经交给它的响应字节；它不撤销 DSH 已经接收的工作，也不关闭共享 WebServer、不 dispose Session Controller，也不停止任何 Agent。
 
 ### 源文件地图
 
