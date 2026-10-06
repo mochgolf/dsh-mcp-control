@@ -451,7 +451,7 @@ describe('mcp-control request guards', () => {
     // Barrier: the server's own write returned false, so the SDK adapter is
     // waiting for a drain the paused client will never produce.
     const backpressured = Promise.withResolvers<null>()
-    let blocked: ServerResponse | undefined
+    const blockedResponses: ServerResponse[] = []
     const originalWrite = responseWrite()
     // `write` is overloaded in Node's declarations, so the patch is typed by
     // the implementation it wraps rather than by the public overload set.
@@ -462,7 +462,7 @@ describe('mcp-control request guards', () => {
     ): boolean {
       const accepted = originalWrite.call(this, chunk, ...rest)
       if (!accepted) {
-        blocked ??= this
+        blockedResponses.push(this)
         backpressured.resolve(null)
       }
       return accepted
@@ -505,6 +505,7 @@ describe('mcp-control request guards', () => {
       // a response still waiting, well afterwards, for a drain that only the
       // paused client could produce.
       await new Promise(resolve => setTimeout(resolve, 500))
+      const blocked = blockedResponses[0]
       expect(blocked?.writableNeedDrain, 'the response write is still waiting for a drain').toBe(true)
       expect(blocked?.writableFinished, 'the response is still unfinished').toBe(false)
 
