@@ -9,6 +9,7 @@
  * @module @mochgolf/dsh-mcp-control
  */
 
+import type { Socket } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -70,6 +71,25 @@ interface InFlightRequest {
   readonly settled: Promise<void>
   /** Ends this request's own socket so neither intake nor a blocked write can outlive the endpoint. */
   readonly terminate: () => void
+}
+
+/**
+ * End one connection abortively (TCP RST). A graceful close only stops this
+ * process from writing: bytes already handed to the operating system are still
+ * delivered after the endpoint is gone — on Windows, where a write hands the
+ * whole buffer to the OS at once, a stalled client later reads a complete
+ * response — and the kernel holds those buffers until the client drains them.
+ * A reset discards them on every platform.
+ * @param socket - the request's connection.
+ */
+function resetConnection(socket: Socket): void {
+  if (socket.destroyed) return
+  try {
+    socket.resetAndDestroy()
+  } catch {
+    /* v8 ignore next 2 -- the shared WebServer listens on TCP; a reset only throws for another handle type. */
+    socket.destroy()
+  }
 }
 
 /**
@@ -192,9 +212,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         // request's own completion rather than a rejection.
         settled: serve(request, response),
         terminate: () => {
+          /* v8 ignore next 4 -- only an unload landing inside the settlement microtask sees an already flushed response. */
+          if (!response.writableFinished) {
+            resetConnection(request.socket)
+            response.destroy()
+          }
           request.destroy()
-          /* v8 ignore next -- only an unload landing inside the settlement microtask sees an already flushed response. */
-          if (!response.writableFinished) response.destroy()
         },
       }
       const released = (): void => { inFlight.delete(entry) }
