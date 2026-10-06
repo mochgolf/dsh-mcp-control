@@ -51,6 +51,7 @@ export const TOOL_NAMES = [
   'session_send',
   'session_start',
   'session_status',
+  'turn_result',
 ] as const
 
 /**

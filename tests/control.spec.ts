@@ -670,7 +670,7 @@ describe('tool result and annotation contract', () => {
     const client = await clientFor(harness)
     const tools = (await client.listTools()).tools
     const byName = new Map(tools.map(tool => [tool.name, tool]))
-    for (const name of ['agents_list', 'events_read', 'session_status']) {
+    for (const name of ['agents_list', 'events_read', 'session_status', 'turn_result']) {
       expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(true)
     }
     for (const name of ['session_start', 'session_send', 'session_cancel', 'child_send', 'child_interrupt']) {

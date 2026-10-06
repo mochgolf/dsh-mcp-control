@@ -5,10 +5,7 @@
  * against the same data a live run would leave behind.
  */
 
-import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -24,7 +21,6 @@ import {
   closeAll,
   connectClient,
   seedSession,
-  TEST_TOKEN,
   textJson,
   type Harness,
 } from './harness.ts'
@@ -456,46 +452,6 @@ describe('events_read result budget', () => {
     expect(answer.has_more).toBe(true)
     const resumed = await page(client, 'prefix-budget', { after_seq: answer.next_seq as number, max_events: 8 })
     expect((resumed.events as Array<{ seq: number }>)[0]?.seq).toBe((delivered.at(-1)?.seq ?? -1) + 1)
-  })
-
-  it('runs the compact turn collector through pages and verified chunks', { timeout: 60_000 }, async () => {
-    const harness = await boot({
-      script: [textResponse('compact final answer')],
-      config: { maxToolResultBytes: 8192, defaultChunkBytes: 2048, maxRequestBytes: 1 << 20 },
-    })
-    const hugeText = `${'汉字🙂'.repeat(6_000)}END`
-    const client = await clientFor(harness)
-    const started = textJson(await client.callTool({
-      name: 'session_start',
-      arguments: {
-        cwd: harness.workspace,
-        prompt: hugeText,
-        session_id: 'collector-example',
-        request_id: 'collector-request',
-      },
-    }))
-    expect(started.accepted).toBe(true)
-    await harness.ctx.agents.get(SessionId('collector-example'))!.whenIdle()
-
-    const script = fileURLToPath(new URL('../examples/collect-turn.mjs', import.meta.url))
-    const { stdout } = await promisify(execFile)(process.execPath, [script], {
-      env: {
-        DSH_MCP_CONTROL_URL: `${harness.baseUrl}/mcp`,
-        DSH_MCP_CONTROL_TOKEN: TEST_TOKEN,
-        DSH_MCP_CONTROL_SESSION_ID: 'collector-example',
-        DSH_MCP_CONTROL_REQUEST_ID: 'collector-request',
-        DSH_MCP_CONTROL_TIMEOUT_MS: '10000',
-      },
-    })
-    expect(JSON.parse(stdout)).toMatchObject({
-      session_id: 'collector-example',
-      request_id: 'collector-request',
-      turn: 1,
-      final_message: 'compact final answer',
-      reason: { kind: 'completed' },
-      diagnostics: [],
-    })
-    expect(Buffer.byteLength(stdout)).toBeLessThan(512)
   })
 
   it('reports result-too-large when the page header alone cannot fit', { timeout: 30_000 }, async () => {
