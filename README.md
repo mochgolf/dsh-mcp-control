@@ -137,7 +137,7 @@ The result names the prompt's `state`:
 | `running` | The turn is still computing, or has just claimed the prompt; call again |
 | `queued` | The prompt waits in the inbox; with `agent_status: "idle"` it is stranded and starts only when another prompt wakes the Agent |
 | `blocked_on_approval` | `pending_approvals` lists what a human must decide in the Web UI before the turn can continue |
-| `discarded` | The prompt entered the inbox but was removed before any turn ran it — by `session_cancel` with `clear_queue`, or by the Agent's shutdown, which cancels whatever is still pending |
+| `discarded` | The prompt entered the inbox but no turn ran it — removed by `session_cancel` with `clear_queue` or by the Agent's shutdown, which cancels whatever is still pending, or claimed by a turn whose `agent/pre-step` listener rewrote it away |
 | `not_found` | Neither the log nor the durable inbox holds that `request_id` |
 
 One call waits up to `wait_ms` (default 20000; `0` answers at once), capped below `requestTimeoutMs` so the call answers before its own deadline, and returns as soon as the turn ends or blocks; a stranded prompt is reported within a fraction of a second rather than after the full wait. It is woken by the Session's own events, keeps nothing between calls, and never activates a cold Session. Raw reasoning, tool traces, and unrelated events never appear; a final message too large for the result budget is shortened on a code-point boundary with `final_message_truncated: true`, and `final_message_seq` names the event `events_read` returns whole. Because it travels over the MCP connection the client already holds, it needs no shell access, network permission, or token in a sandboxed agent's command environment.

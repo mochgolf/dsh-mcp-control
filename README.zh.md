@@ -137,7 +137,7 @@ tool_timeout_sec = 30
 | `running` | 轮次仍在计算，或刚刚领取了该提示词；请再次调用 |
 | `queued` | 提示词仍在收件箱中等待；若 `agent_status` 为 `"idle"`，它已滞留，只有其他提示词唤醒 Agent 时才会开始 |
 | `blocked_on_approval` | `pending_approvals` 列出需要人类在 Web UI 中作出的决定，之后轮次才能继续 |
-| `discarded` | 提示词进入过收件箱，但在任何轮次执行它之前就被移除了——由带 `clear_queue` 的 `session_cancel` 移除，或在 Agent 关闭时被取消（关闭会取消所有仍在等待的提示词） |
+| `discarded` | 提示词进入过收件箱，但没有任何轮次执行它——被带 `clear_queue` 的 `session_cancel` 移除，或在 Agent 关闭时被取消（关闭会取消所有仍在等待的提示词），或被某个轮次领取后又被其 `agent/pre-step` 监听器改写掉 |
 | `not_found` | 日志与持久化收件箱中都没有该 `request_id` |
 
 单次调用最多等待 `wait_ms`（默认 20000；`0` 立即作答），且上限低于 `requestTimeoutMs`，保证调用在自身截止时间之前作答；轮次一旦结束或被阻塞就立即返回，滞留的提示词会在不到一秒内报告，而不会等满整个时长。它由会话自身的事件唤醒，在调用之间不保存任何东西，也从不激活冷会话。原始 reasoning、工具轨迹与无关事件都不会出现；超出结果预算的最终消息会在码点边界截短并带上 `final_message_truncated: true`，`final_message_seq` 指出可由 `events_read` 完整读取的事件。由于它走客户端已持有的 MCP 连接，沙箱中的 agent 无需 shell 访问、网络权限，也无需在命令环境里提供 token。
