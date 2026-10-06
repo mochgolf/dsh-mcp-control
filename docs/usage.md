@@ -42,15 +42,15 @@ tool_timeout_sec = 30
 
 Keep `tool_timeout_sec` above the endpoint's `requestTimeoutMs` (25 s by default), so a slow call is answered — with its outcome or an explicit `request-timeout` — before the client gives up on it, and keep the token in `bearer_token_env_var` rather than a literal `Authorization` header in the client's config file.
 
-The client lists seven tools: `session_start`, `session_send`, `session_cancel`, `agents_list`, `child_send`, `child_interrupt`, and `events_read`. The [package README](../README.md) owns their inputs, results, error codes, and the page/chunk form of `events_read`.
+The client lists eight tools: `session_start`, `session_send`, `session_cancel`, `session_status`, `agents_list`, `child_send`, `child_interrupt`, and `events_read`. The [package README](../README.md) owns their inputs, results, error codes, and the page/chunk form of `events_read`.
 
 `accepted: true` means DSH admitted the work — not that a turn finished. A `child_send` needs the child's direct parent to be live; the endpoint refuses a cold parent instead of resuming it.
 
 ## Verify the path
 
-A first check confirms the endpoint serves only the seven tools and that a Session reaches disk:
+A first check confirms the endpoint serves only the tools above and that a Session reaches disk:
 
-1. The client completes the MCP handshake against `http://127.0.0.1:8931/mcp` and `tools/list` returns exactly the seven tools above.
+1. The client completes the MCP handshake against `http://127.0.0.1:8931/mcp` and `tools/list` returns exactly the tools above.
 2. `session_start` with the client's actual, existing project directory as `cwd` and a prompt returns `session_id` and `accepted: true` immediately, before the turn finishes; when that path already belongs to a Workspace, the new Session appears there, while any other path remains ungrouped; a missing or mistyped directory is refused with `mcp-control/cwd-not-found` rather than created. Omit `agent_preset` to use the deployment default. Set `permission_preset: "read-only"` when the Session must inspect that real project without writing, then check the returned `cwd`, `workspace`, `agent_preset`, and `permission_preset` before coordinating more work.
 3. Run `examples/collect-turn.mjs` with the returned Session and request ids. It follows `events_read` pages and chunks and returns the final answer without copying the raw reasoning and tool trace into the controlling client's context.
 4. Let the model create a child through its own subagent tool, then `agents_list` shows that child with its `parentId` and `depth`.
@@ -66,7 +66,8 @@ The token is full control of every Session this DSH instance can address by id �
 ## Limits
 
 - Only known Session ids can be controlled: there is no enumeration, search, rename, delete, fork, model switch, or history rewrite.
-- A task that needs an approval still waits for a human in the Web UI.
+- A task that needs an approval still waits for a human in the Web UI; `session_status` lists the approvals its open turn waits on.
+- `session_cancel` keeps prompts still waiting in the inbox, and they run as soon as a later prompt wakes the Agent; pass `clear_queue: true` to remove them.
 - A cold direct parent blocks child control until it is recovered through its own entry point.
 - A page header or a full descendant tree that alone exceeds the configured result budget is refused with `mcp-control/result-too-large`; only a single oversized event has a chunk mode.
 - A page far into a large log reads the logical prefix that covers its cursor, not just the events it returns: one page 99,000 events into a generated 100,000-event log took about 0.9 s and 224 MB of heap. Continue from the cursor you already hold instead of re-reading from `-1`.

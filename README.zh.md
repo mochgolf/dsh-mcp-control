@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-mcp-control` 在 DSH Web 监听器上提供 Model Context Protocol 服务，使同一台机器上的 MCP 客户端可以按 id 驱动它已经知道的会话。七个工具用于创建或采用根会话、提交与取消其工作、列出其 durable subagent 树、向 continuable child 投递消息，以及读取 durable 事件日志。每次调用都使用原生 Session Controller、subagent 运行时与 Workspace Registry：该端点不拥有任务状态、不启动第二个监听器、不注册任何面向模型的工具，也从不代替用户回答审批。部署方主动插入该插件，其 bearer token 等同于对该实例可寻址的每个会话的完整控制权。
+`dsh-mcp-control` 在 DSH Web 监听器上提供 Model Context Protocol 服务，使同一台机器上的 MCP 客户端可以按 id 驱动它已经知道的会话。这些工具用于创建或采用根会话、提交与取消其工作、报告会话当前在做什么、列出其 durable subagent 树、向 continuable child 投递消息，以及读取 durable 事件日志。每次调用都使用原生 Session Controller、subagent 运行时与 Workspace Registry：该端点不拥有任务状态、不启动第二个监听器、不注册任何面向模型的工具，也从不代替用户回答审批。部署方主动插入该插件，其 bearer token 等同于对该实例可寻址的每个会话的完整控制权。
 
 本仓库以 DSH `0.2.0-rc.2` 为兼容测试基线。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件，无需修改 DSH runtime。
 
@@ -80,13 +80,18 @@ tool_timeout_sec = 30
 |---|---|---|
 | `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset` |
 | `session_send` | `session_id`、`message`；可选 `delivery`（`queue` 或 `steer`）、`request_id` | `session_id`、`request_id`、`accepted` |
-| `session_cancel` | `session_id` | `session_id`、原生 `accepted` |
+| `session_cancel` | `session_id`；可选 `clear_queue` | `session_id`、原生 `accepted`；清空时附 `removed_queue_items` |
+| `session_status` | `address`，格式同 `events_read` | 地址 id、`agent_status`、`head_seq`、最新 `turn`、等待中的 `queue`、`pending_approvals` |
 | `agents_list` | `root_session_id` | `root_session_id`、带 `parentId` 与 `depth` 的原生 durable `entries` |
 | `child_send` | `parent_session_id`、`child_session_id`、`message`；可选 `delivery`、`request_id` | 两个 id、`request_id`、`message_id`、`accepted` |
 | `child_interrupt` | `parent_session_id`、`child_session_id` | 两个 id、原生 `accepted` |
 | `events_read` | 下文的分页或分片请求 | 下文的分页或分片结果 |
 
-`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。`cwd` 必须是指向已存在目录的完全限定路径——Windows 上须为带盘符或 UNC 的路径，不能是 `\repo`、`/home/me/repo` 这类会按 DSH 进程当前盘符解析的根相对路径。目录在调用 DSH 之前完成检查，因为会话创建会把缺失的目录直接建出来并在其中开始工作：不存在的路径以 `mcp-control/cwd-not-found` 拒绝，文件以 `mcp-control/cwd-not-directory` 拒绝，两者都带 `stage: "cwd"`。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。未提供 `session_id` 但提供了 `request_id` 时，会话 id 由该 `request_id`、规范化后的 `cwd` 与提示词派生，因此首次回执没有送达的重试——客户端自己的工具超时触发了，或用户中断了调用——会采用首次尝试已创建的会话，且不会重复提交提示词；每次新建都应传入新的 UUID，重试时原样复用。两者都不提供时，仍随机生成 id。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
+`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。`cwd` 必须是指向已存在目录的完全限定路径——Windows 上须为带盘符或 UNC 的路径，不能是 `\repo`、`/home/me/repo` 这类会按 DSH 进程当前盘符解析的根相对路径。目录在调用 DSH 之前完成检查，因为会话创建会把缺失的目录直接建出来并在其中开始工作：不存在的路径以 `mcp-control/cwd-not-found` 拒绝，文件以 `mcp-control/cwd-not-directory` 拒绝，两者都带 `stage: "cwd"`。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。未提供 `session_id` 但提供了 `request_id` 时，会话 id 由该 `request_id`、规范化后的 `cwd` 与提示词派生，因此首次回执没有送达的重试——客户端自己的工具超时触发了，或用户中断了调用——会采用首次尝试已创建的会话，且不会重复提交提示词；每次新建都应传入新的 UUID，重试时原样复用。两者都不提供时，仍随机生成 id。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。
+
+`session_status` 在不激活会话的前提下报告它当前在做什么：`agent_status`（`running`、`idle` 或 `not_loaded`）、最新 `turn` 及其是否仍未结束、live 收件箱中每条仍在等待的提示词及其 `request_id`，以及未结束轮次正在等待的 `pending_approvals`。它能区分只读日志的调用者分辨不出的三种状态：轮次仍在计算、轮次被只有人类才能在 Web UI 中作出的决定阻塞、提示词滞留在收件箱中。滞留的提示词不会自行开始：`session_cancel` 默认保留等待中的提示词，而之后任何一条提示词唤醒 Agent 时它们就会立即执行，因此需要传入 `clear_queue: true`，在中断之前通过控制器自身的队列修改把它们移除。
+
+`agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
 
 ### 读取 durable 事件
 
@@ -154,7 +159,10 @@ node ./examples/collect-turn.mjs
 | [`src/index.ts`](src/index.ts) | 插件入口：路由注册、卸载生命周期、请求接收 |
 | [`src/config.ts`](src/config.ts) | 部署配置 schema 与跨字段校验 |
 | [`src/http.ts`](src/http.ts) | 权威、origin、bearer token 与有界请求体检查 |
-| [`src/tools.ts`](src/tools.ts) | 七个工具及其原生服务调用 |
+| [`src/tools.ts`](src/tools.ts) | 工具注册；start、send、cancel 与 subagent 工具及其原生服务调用 |
+| [`src/paths.ts`](src/paths.ts) | 完全限定 `cwd` 规则，以及会话创建前的存在性检查 |
+| [`src/log.ts`](src/log.ts) | 读取类工具共享的地址 schema、不激活会话的开场观察与向后尾部读取 |
+| [`src/status.ts`](src/status.ts) | `session_status`，以及轮次、收件箱与审批的折叠 |
 | [`src/events.ts`](src/events.ts) | `events_read` 分页、字节预算与分片重组 |
 | [`src/result.ts`](src/result.ts) | 结果、失败与单次调用截止时间处理 |
 | [`examples/collect-turn.mjs`](examples/collect-turn.mjs) | 使用私有游标和已校验分片收集紧凑最终答案 |

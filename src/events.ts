@@ -14,12 +14,11 @@ import type {
   SessionAddress,
   SessionHistoryRecord,
   SessionWireEvent,
-  SessionWireHeader,
 } from '@deepseek-ai/dsh-api-session-controller/types'
-import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { bytesToBase64 } from '@deepseek-ai/dsh-util-crypto'
 import type { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
+import { addressSchema, nativeAddress, OPENING_MAX_MESSAGES, openingSnapshot, type OpeningSnapshot } from './log.ts'
 import {
   boundedInputSchema,
   errorResult,
@@ -31,23 +30,6 @@ import {
   withinDeadline,
   type ControlDeps,
 } from './result.ts'
-
-/** Message-aligned page budget for the opening observation: the smallest window the snapshot can return. */
-const OPENING_MAX_MESSAGES = 1
-
-/** One opaque durable identity accepted from a client. */
-const opaqueId = z.string().min(1).max(256)
-
-/** Durable address of one root Session or one direct subagent child. */
-const addressSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('session'), session_id: opaqueId }),
-  z.strictObject({
-    kind: z.literal('subagent'),
-    parent_session_id: opaqueId,
-    child_session_id: opaqueId,
-    mode: z.enum(['one-shot', 'continuable']),
-  }),
-])
 
 /** Forward page request; `mode` may be omitted, which means `page`. */
 const pageSchema = z.strictObject({
@@ -98,53 +80,6 @@ const chunkOutputSchema = z.object({
   sha256: z.string(),
   done: z.boolean(),
 })
-
-/** Map one validated MCP address onto the native durable address. */
-function nativeAddress(address: z.infer<typeof addressSchema>): SessionAddress {
-  if (address.kind === 'session') {
-    return { kind: 'session', sessionId: SessionId(address.session_id) }
-  }
-  return {
-    kind: 'subagent',
-    parentSessionId: SessionId(address.parent_session_id),
-    childSessionId: SessionId(address.child_session_id),
-    mode: address.mode,
-  }
-}
-
-/** The opening observation of one durable address: header, watermark, and its trailing window. */
-interface OpeningSnapshot {
-  readonly header: SessionWireHeader
-  readonly cursor: number
-  readonly records: readonly SessionHistoryRecord[]
-}
-
-/**
- * Take exactly one frame from `follow` and close the iterator. The ordinary
- * Session promotion this generator performs runs after its first yield, so
- * returning immediately keeps the read cold; the `finally` block releases the
- * observation, the listeners, and the caller's signal handler.
- */
-async function openingSnapshot(
-  deps: ControlDeps,
-  address: SessionAddress,
-  signal: AbortSignal,
-): Promise<OpeningSnapshot> {
-  const iterator = deps.ctx.sessionController.follow(
-    { address, maxMessages: OPENING_MAX_MESSAGES },
-    signal,
-  )[Symbol.asyncIterator]()
-  try {
-    const frame = await withinDeadline(iterator.next(), signal)
-    /* v8 ignore next 3 -- follow's documented first frame is always the opening snapshot, built before any other frame can be produced. */
-    if (frame.done === true || frame.value.type !== 'snapshot') {
-      throw new Error('session follow did not open with a snapshot frame')
-    }
-    return { header: frame.value.header, cursor: frame.value.cursor, records: frame.value.records }
-  } finally {
-    await iterator.return?.()
-  }
-}
 
 /** Events of one record window, limited to the half-open sequence interval the caller asked for. */
 function windowEvents(

@@ -27,6 +27,7 @@ import {
   startRootAgent,
   TEST_TOKEN,
   textJson,
+  TOOL_NAMES,
   type Harness,
 } from './harness.ts'
 
@@ -119,20 +120,12 @@ function postHeaders(harness: Harness, extra: Record<string, string> = {}): Reco
 }
 
 describe('mcp-control request guards', () => {
-  it('accepts a valid bearer token and completes a real MCP handshake listing only the seven tools', { timeout: 30_000 }, async () => {
+  it('accepts a valid bearer token and completes a real MCP handshake listing only the control tools', { timeout: 30_000 }, async () => {
     const harness = await boot()
     const client = await connectClient(`${harness.baseUrl}/mcp`)
     clients.push(client)
     const tools = await client.listTools()
-    expect(tools.tools.map(tool => tool.name).sort()).toEqual([
-      'agents_list',
-      'child_interrupt',
-      'child_send',
-      'events_read',
-      'session_cancel',
-      'session_send',
-      'session_start',
-    ])
+    expect(tools.tools.map(tool => tool.name).sort()).toEqual(TOOL_NAMES)
   })
 
   it('refuses a missing, malformed, wrong, empty, and duplicated bearer token with 401 before any DSH service call', { timeout: 30_000 }, async () => {
@@ -209,7 +202,7 @@ describe('mcp-control request guards', () => {
     harness.setToken('rotated-token')
     const rotated = await connectClient(url, 'rotated-token')
     clients.push(rotated)
-    expect((await rotated.listTools()).tools).toHaveLength(7)
+    expect((await rotated.listTools()).tools).toHaveLength(TOOL_NAMES.length)
 
     harness.setToken(undefined)
     const answer = await rawHttp(harness.port, {
@@ -295,7 +288,7 @@ describe('mcp-control request guards', () => {
 
     const client = await connectClient(`${harness.baseUrl}/mcp`)
     clients.push(client)
-    expect((await client.listTools()).tools).toHaveLength(7)
+    expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length)
   })
 
   it('rejects configuration the endpoint cannot serve', { timeout: 60_000 }, async () => {
@@ -358,7 +351,7 @@ describe('mcp-control request guards', () => {
     try {
       const fiber = await harness.ctx.plugin(McpControl, controlConfig())
       const client = await connectClient(`${harness.baseUrl}/mcp`)
-      expect((await client.listTools()).tools).toHaveLength(7)
+      expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length)
       await fiber.dispose()
       await client.close()
 

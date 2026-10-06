@@ -11,11 +11,13 @@ import { createHash } from 'node:crypto'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
+import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
 import { checkCwd, isFullyQualifiedPath } from './paths.ts'
+import { registerSessionStatus, rpcIdOf } from './status.ts'
 import {
   boundedInputSchema,
   errorResult,
@@ -266,25 +268,59 @@ function registerSessionSend(server: McpServer, deps: ControlDeps): void {
   )
 }
 
-/** Register `session_cancel`: ask the live root Agent to interrupt its current turn. */
+/** Register `session_cancel`: ask the live root Agent to interrupt its current turn, optionally clearing its inbox first. */
 function registerSessionCancel(server: McpServer, deps: ControlDeps): void {
   server.registerTool(
     'session_cancel',
     {
       title: 'Cancel a DSH session turn',
       description:
-        'Ask the live Agent attached to a root DSH session to interrupt its current turn. Unclaimed pending inbox entries and descendant subagents are left alone. '
+        'Ask the live Agent attached to a root DSH session to interrupt its current turn. Descendant subagents are left alone. '
+        + 'By default unclaimed inbox prompts stay queued, and they run as soon as any later prompt wakes the agent; '
+        + 'set clear_queue to remove them first, so nothing sent before the cancel runs afterwards. '
         + 'The receipt means the interrupt was admitted, not that the turn has already stopped.',
-      inputSchema: boundedInputSchema(deps, 'session_cancel', z.strictObject({ session_id: opaqueId })),
-      outputSchema: z.object({ session_id: z.string(), accepted: z.literal(true) }),
+      inputSchema: boundedInputSchema(deps, 'session_cancel', z.strictObject({
+        session_id: opaqueId,
+        clear_queue: z.boolean().default(false)
+          .describe('Remove every prompt still waiting in the inbox before interrupting the turn.'),
+      })),
+      outputSchema: z.object({
+        session_id: z.string(),
+        accepted: z.literal(true),
+        removed_queue_items: z.array(z.object({ item_id: z.string(), request_id: z.string().nullable() })).optional(),
+      }),
     },
-    (args, context) => {
+    async (args, context) => {
       using guard = operationDeadline(deps, context)
       const correlation = { session_id: args.session_id }
+      const sessionId = SessionId(args.session_id)
       try {
         guard.signal.throwIfAborted()
-        const receipt = deps.ctx.sessionController.cancel({ sessionId: SessionId(args.session_id) })
-        return okWithinBudget(deps, { session_id: args.session_id, accepted: receipt.accepted })
+        const removed: Array<{ item_id: string; request_id: string | null }> = []
+        if (args.clear_queue) {
+          // Removal goes through the controller's own queue mutation, which keeps
+          // its ownership checks and retires the prompt's upload bindings.
+          const inbox = deps.ctx.agents.get(sessionId)?.inbox
+          for (const message of inbox === undefined ? [] : [...inbox.nextStep, ...inbox.nextTurn]) {
+            try {
+              await withinDeadline(deps.ctx.sessionController.updateQueue({
+                sessionId,
+                itemId: message.id,
+                action: { kind: 'remove' },
+              }), guard.signal)
+              removed.push({ item_id: message.id, request_id: rpcIdOf(message.source) ?? null })
+            } catch (error: unknown) {
+              // The Agent claimed the prompt meanwhile; the interrupt below stops it.
+              if (remoteErrorOf(error)?.code !== 'session/queue-item-not-found') throw error
+            }
+          }
+        }
+        const receipt = deps.ctx.sessionController.cancel({ sessionId })
+        return okWithinBudget(deps, {
+          session_id: args.session_id,
+          accepted: receipt.accepted,
+          ...(args.clear_queue ? { removed_queue_items: removed } : {}),
+        })
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, correlation)
       }
@@ -431,5 +467,6 @@ export function createControlServer(deps: ControlDeps): McpServer {
   registerChildSend(server, deps)
   registerChildInterrupt(server, deps)
   registerEventsRead(server, deps)
+  registerSessionStatus(server, deps)
   return server
 }
