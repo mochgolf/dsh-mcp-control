@@ -224,6 +224,19 @@ describe('turn_result', () => {
     })
   })
 
+  it('reports a claim that a pre-step listener rewrote away as discarded', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot()
+    await seedSession(harness, 'absorbed', (session) => {
+      const append = session.append.bind(session) as (type: string, data: unknown) => void
+      append('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ content: [{ type: 'text', text: 'absorbed' }], source: { kind: 'user', rpcId: 'R1' }, role: 'user', id: 'absorbed-r1' }] })
+      append('turn/start', { turn: 1 })
+      // The claim happened, but the step's batch was rewritten to nothing.
+      append('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    })
+    expect(await turnResult(client, 'absorbed', 'R1', 0)).toMatchObject({ state: 'discarded', turn: 1 })
+  })
+
   it('answers not_found for a request id neither the log nor the inbox holds', { timeout: 30_000 }, async () => {
     const { harness, client } = await boot({ script: [textResponse('done')] })
     await call(client, 'session_start', { cwd: harness.workspace, prompt: 'answer', session_id: 'known', request_id: 'R1' })

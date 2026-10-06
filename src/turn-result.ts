@@ -107,9 +107,9 @@ interface InboxSplice {
  * Replay the durable inbox splices to learn what became of the prompt. The
  * loop claims a prompt with a removal that carries no outcome and records its
  * `user/message` only after the step is prepared, while a removal that drops
- * a prompt unrun — `clear_queue`, a clearing cancel, an Agent shutdown — is
- * marked `outcome: "canceled"`; telling them apart keeps a prompt that is about
- * to run from being reported as discarded.
+ * a prompt unrun — `clear_queue`, a clearing cancel, an Agent shutdown —
+ * carries an outcome (DSH writes `canceled`); telling them apart keeps a prompt
+ * that is about to run from being reported as discarded.
  * @param events - the complete log, from seq 0.
  * @param requestId - the prompt's client correlation id.
  * @returns the prompt's fate in the inbox.
@@ -120,6 +120,8 @@ function inboxFate(events: readonly SessionWireEvent[], requestId: string): Inbo
   for (const event of events) {
     if (event.type !== 'agent/inbox/spliced') continue
     const splice = event.data as unknown as InboxSplice
+    /* v8 ignore next -- the Agent Loop is the only producer and always writes a known target and an inserted list. */
+    if (!(splice.target in lists) || !Array.isArray(splice.inserted)) continue
     const removed = lists[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
     if (removed.some(message => rpcIdOf(message.source) === requestId)) {
       fate = splice.outcome === undefined ? { kind: 'claimed', seq: event.seq } : { kind: 'canceled' }
@@ -214,8 +216,14 @@ async function evaluate(deps: ControlDeps, address: Address, requestId: string, 
       }
       const turn = ((events[start] as SessionWireEvent).data as { turn: number }).turn
       const facts = turnFacts(events, start, turn)
-      // A turn closed before it recorded the prompt — interrupted by a crash,
-      // say — ran nothing for it.
+      // A turn that closed before recording the prompt ran nothing for it. One
+      // that completed had its claim rewritten away by an agent/pre-step
+      // listener — DSH itself counts that input as unrun — so the prompt was
+      // discarded; any other ending (interrupted, aborted, blocked, error) is
+      // that turn's own outcome for the prompt.
+      if (!facts.open && facts.reason?.kind === 'completed') {
+        return { state: 'discarded', agentStatus, value: { ...base, state: 'discarded', turn, diagnostics: [] } }
+      }
       const state: TurnState = facts.open ? 'running' : 'ended'
       return {
         state,

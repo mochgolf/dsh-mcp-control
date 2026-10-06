@@ -75,8 +75,9 @@ function correlateOnly(details: Record<string, unknown>): Record<string, unknown
       kept[key] = value
     }
     // A count survives when the list it summarizes cannot, so the caller still
-    // learns how much was affected.
+    // learns how much was affected, and an admitted receipt stays visible.
     if (typeof value === 'number' && key.endsWith('_count')) kept[key] = value
+    if (key === 'accepted' && typeof value === 'boolean') kept[key] = value
   }
   return kept
 }
@@ -95,8 +96,10 @@ function failureOf(code: string, message: string, details: Record<string, unknow
  * Build one tool failure. The DSH code, message, and public details pass through
  * unchanged; a payload that does not fit the result budget degrades to an
  * explicit `result-too-large` failure that keeps the correlation fields the
- * budget admits and names the ones it dropped, never a silently truncated copy
- * of the original.
+ * budget admits — ids, stage, receipt, counts, and an admitted `accepted` —
+ * and names the correlation fields it dropped, never a silently truncated copy
+ * of the original; larger payload fields are left out and summarized only by
+ * the counts their producers supply.
  * @param deps - plugin dependencies carrying the result budget.
  * @param code - failure code, either a DSH code or an `mcp-control/*` code.
  * @param message - user-safe diagnostic.

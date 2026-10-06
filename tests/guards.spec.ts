@@ -293,6 +293,11 @@ describe('result mapping', () => {
     expect(result.structuredContent).toMatchObject({
       error: { code: 'mcp-control/result-too-large', details: { code: 'session/not-found', session_id: 'cleared', removed_queue_item_count: 200 } },
     })
+    // An admitted receipt too large to return still says it was admitted.
+    const admitted = okWithinBudget(deps(), { session_id: 'cleared', accepted: true, removed_queue_items: removed, removed_queue_item_count: removed.length })
+    expect(admitted.structuredContent).toMatchObject({
+      error: { code: 'mcp-control/result-too-large', details: { session_id: 'cleared', accepted: true, removed_queue_item_count: 200 } },
+    })
   })
 
   it('measures one value by its UTF-8 JSON bytes', () => {
