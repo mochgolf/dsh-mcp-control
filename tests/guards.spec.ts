@@ -283,6 +283,18 @@ describe('result mapping', () => {
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
   })
 
+  it('keeps a count when the list it summarizes does not fit the budget', () => {
+    const removed = Array.from({ length: 200 }, (_value, index) => ({ item_id: `item-${String(index)}`, request_id: `request-${String(index)}` }))
+    const result = errorResult(deps(), 'session/not-found', 'not attached', {
+      session_id: 'cleared',
+      removed_queue_items: removed,
+      removed_queue_item_count: removed.length,
+    })
+    expect(result.structuredContent).toMatchObject({
+      error: { code: 'mcp-control/result-too-large', details: { code: 'session/not-found', session_id: 'cleared', removed_queue_item_count: 200 } },
+    })
+  })
+
   it('measures one value by its UTF-8 JSON bytes', () => {
     expect(jsonBytes({ a: 1 })).toBe(Buffer.byteLength('{"a":1}'))
     expect(jsonBytes({ text: '汉字' })).toBe(Buffer.byteLength(JSON.stringify({ text: '汉字' })))

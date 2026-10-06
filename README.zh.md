@@ -91,7 +91,7 @@ tool_timeout_sec = 30
 
 `session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。`cwd` 必须是指向已存在目录的完全限定路径——Windows 上须为带盘符或 UNC 的路径，不能是 `\repo`、`/home/me/repo` 这类会按 DSH 进程当前盘符解析的根相对路径。目录在调用 DSH 之前完成检查，因为会话创建会把缺失的目录直接建出来并在其中开始工作：不存在的路径以 `mcp-control/cwd-not-found` 拒绝，文件以 `mcp-control/cwd-not-directory` 拒绝，两者都带 `stage: "cwd"`。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组；除非启用 `autoRegisterWorktrees`，端点不会创建工作区。链接 git 工作树——Codex 工作树任务所在的目录——与其主检出是不同的目录，而工作区成员关系要求路径完全一致，因此其会话保持未分组，而不会被挪进主检出的工作区：那样主检出的路径会取代 `cwd`，工作也会落进主检出。回执中的 `git_worktree` 给出工作树 `root`、`main_path`、`branch`（游离 HEAD 时为 `null`），以及为该主检出登记的 `main_workspace`。设置 `autoRegisterWorktrees: true` 时，工作树根目录本身会被登记为标题为 `<仓库> · <分支>` 的工作区，会话挂载其下；子目录永远不会被登记，工作树删除后该工作区仍会保留。当实际 preset 为 `workspace-write`、而仓库元数据位于 `cwd` 之外时（每个链接工作树以及检出的任意子目录都是如此），`warnings` 会带上 `git-metadata-outside-cwd`：会话可以在其中修改文件，但写入仓库的 git 命令很可能被拒绝，因此应由拥有该工作树的客户端提交。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。未提供 `session_id` 但提供了 `request_id` 时，会话 id 由该 `request_id`、规范化后的 `cwd` 与提示词派生，因此首次回执没有送达的重试——客户端自己的工具超时触发了，或用户中断了调用——会采用首次尝试已创建的会话，且不会重复提交提示词；每次新建都应传入新的 UUID，重试时原样复用。两者都不提供时，仍随机生成 id。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。
 
-`session_status` 在不激活会话的前提下报告它当前在做什么：`agent_status`（`running`、`idle` 或 `not_loaded`）、最新 `turn` 及其是否仍未结束、持久化收件箱中每条仍在等待的提示词及其 `request_id`（与日志取自同一次观察，因此即使没有已加载的 Agent 也会报告），以及未结束轮次正在等待的 `pending_approvals`（最多 20 条，其余数量由 `pending_approvals_omitted` 给出）。它能区分只读日志的调用者分辨不出的三种状态：轮次仍在计算、轮次被只有人类才能在 Web UI 中作出的决定阻塞、提示词滞留在收件箱中。滞留的提示词不会自行开始：`session_cancel` 默认保留等待中的提示词，而之后任何一条提示词唤醒 Agent 时它们就会立即执行，因此需要传入 `clear_queue: true`，在中断之前通过控制器自身的队列修改把它们移除。
+`session_status` 在不激活会话的前提下报告它当前在做什么：`agent_status`（`running`、`idle` 或 `not_loaded`）、最新 `turn` 及其是否仍未结束、持久化收件箱中每条仍在等待的提示词及其 `request_id`（与日志取自同一次观察，因此即使没有已加载的 Agent 也会报告），以及未结束轮次正在等待的 `pending_approvals`（最多 20 条，其余数量由 `pending_approvals_omitted` 给出）。它能区分只读日志的调用者分辨不出的三种状态：轮次仍在计算、轮次被只有人类才能在 Web UI 中作出的决定阻塞、提示词滞留在收件箱中。滞留的提示词不会自行开始：`session_cancel` 默认保留等待中的提示词，而之后任何一条提示词唤醒 Agent 时它们就会立即执行，因此需要传入 `clear_queue: true`，在中断之前通过控制器自身的队列修改把它们移除。中断与移除都需要 Agent 已加载：对于 Agent 未加载的会话，`session_cancel` 会返回 `session/not-found`（并用 `removed_queue_items` 与 `removed_queue_item_count` 列出已经移除的条目），而为它排队的提示词会在之后某条提示词激活该会话时执行。
 
 `agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
 
@@ -134,7 +134,7 @@ tool_timeout_sec = 30
 | `state` | 含义 |
 |---|---|
 | `ended` | 轮次已结束：`reason` 是原生结束原因（`completed`、`aborted`、`error`、`interrupted` 等），`final_message` 是最后一条 assistant 文本或 `null`，`diagnostics` 是该轮次的工具失败 |
-| `running` | 轮次仍在计算；请再次调用 |
+| `running` | 轮次仍在计算，或刚刚领取了该提示词；请再次调用 |
 | `queued` | 提示词仍在收件箱中等待；若 `agent_status` 为 `"idle"`，它已滞留，只有其他提示词唤醒 Agent 时才会开始 |
 | `blocked_on_approval` | `pending_approvals` 列出需要人类在 Web UI 中作出的决定，之后轮次才能继续 |
 | `discarded` | 提示词进入过收件箱，但在任何轮次执行它之前就被移除了——由带 `clear_queue` 的 `session_cancel` 移除，或在 Agent 关闭时被取消（关闭会取消所有仍在等待的提示词） |

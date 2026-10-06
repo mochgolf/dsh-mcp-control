@@ -71,7 +71,7 @@ The token is full control of every Session this DSH instance can address by id â
 
 - Only known Session ids can be controlled: there is no enumeration, search, rename, delete, fork, model switch, or history rewrite.
 - A task that needs an approval still waits for a human in the Web UI; `session_status` lists the approvals its open turn waits on.
-- `session_cancel` keeps prompts still waiting in the inbox, and they run as soon as a later prompt wakes the Agent; pass `clear_queue: true` to remove them.
+- `session_cancel` keeps prompts still waiting in the inbox, and they run as soon as a later prompt wakes the Agent; pass `clear_queue: true` to remove them while the Agent is loaded.
 - A cold direct parent blocks child control until it is recovered through its own entry point.
 - A page header or a full descendant tree that alone exceeds the configured result budget is refused with `mcp-control/result-too-large`; only a single oversized event has a chunk mode.
 - A page far into a large log reads the logical prefix that covers its cursor, not just the events it returns: one page 99,000 events into a generated 100,000-event log took about 0.9 s and 224 MB of heap. Continue from the cursor you already hold instead of re-reading from `-1`.

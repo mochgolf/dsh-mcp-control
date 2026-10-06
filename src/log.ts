@@ -93,12 +93,16 @@ function inboxOf(values: Readonly<Record<string, unknown>> | undefined): Pending
   const prompts = (entries: unknown, delivery: PendingPrompt['delivery']): PendingPrompt[] => {
     /* v8 ignore next -- the inbox projection always carries both pending lists. */
     if (!Array.isArray(entries)) return []
-    return entries.map((entry: { id?: unknown; source?: unknown; content?: unknown }) => ({
-      id: String(entry.id),
-      delivery,
-      source: entry.source,
-      content: Array.isArray(entry.content) ? entry.content : [],
-    }))
+    // An entry without a string id could not be addressed by updateQueue, so it is left out.
+    return entries
+      .filter((entry): entry is { id: string; source?: unknown; content?: unknown } =>
+        typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string')
+      .map(entry => ({
+        id: entry.id,
+        delivery,
+        source: entry.source,
+        content: Array.isArray(entry.content) ? entry.content : [],
+      }))
   }
   return [...prompts(inbox['next-step'], 'steer'), ...prompts(inbox['next-turn'], 'queue')]
 }

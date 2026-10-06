@@ -74,6 +74,9 @@ function correlateOnly(details: Record<string, unknown>): Record<string, unknown
     if (typeof value === 'string' && value.length <= 256 && (key.endsWith('_id') || key === 'stage' || key === 'receipt')) {
       kept[key] = value
     }
+    // A count survives when the list it summarizes cannot, so the caller still
+    // learns how much was affected.
+    if (typeof value === 'number' && key.endsWith('_count')) kept[key] = value
   }
   return kept
 }
