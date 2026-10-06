@@ -15,7 +15,6 @@
   "files": [
     "lib/**/*.js",
     "lib/**/*.d.ts",
-    "examples/collect-turn.mjs",
     "README.md",
     "README.zh.md",
     "LICENSE"
@@ -25,7 +24,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage --coverage.include='src/**/*.ts'",
-    "lint": "oxlint --deny-warnings src tests examples",
+    "lint": "oxlint --deny-warnings src tests",
     "check": "pnpm typecheck && pnpm test:coverage && pnpm lint && pnpm build && publint"
   },
   "engines": {

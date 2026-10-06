@@ -42,7 +42,7 @@ tool_timeout_sec = 30
 
 让 `tool_timeout_sec` 大于端点的 `requestTimeoutMs`（默认 25 秒），这样慢调用会在客户端放弃之前得到答复——要么是结果，要么是明确的 `request-timeout`；并通过 `bearer_token_env_var` 传递 token，不要把它作为明文 `Authorization` 头写进客户端配置文件。
 
-客户端会列出八个工具：`session_start`、`session_send`、`session_cancel`、`session_status`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read`。它们的输入、结果、错误码以及 `events_read` 的分页／分片形式由[包 README](../README.zh.md)说明。
+客户端会列出九个工具：`session_start`、`session_send`、`session_cancel`、`session_status`、`turn_result`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read`。它们的输入、结果、错误码以及 `events_read` 的分页／分片形式由[包 README](../README.zh.md)说明。
 
 `accepted: true` 意味着 DSH 接收了工作，而不是某个轮次已经结束。`child_send` 要求该 child 的直接 parent 处于 live 状态；端点会拒绝冷 parent，而不是恢复它。
 
@@ -52,7 +52,7 @@ tool_timeout_sec = 30
 
 1. 客户端对 `http://127.0.0.1:8931/mcp` 完成 MCP 握手，`tools/list` 恰好返回上述工具。
 2. 把客户端真实存在的项目目录作为 `cwd`，连同一条提示词调用 `session_start`；它会在轮次结束前立即返回 `session_id` 与 `accepted: true`。若该路径已有工作区，新会话会出现在其中，其他路径仍保持未分组；不存在或拼错的目录会以 `mcp-control/cwd-not-found` 拒绝，而不会被创建。省略 `agent_preset` 才会使用部署默认值；若该会话必须只读检查真实项目，则设置 `permission_preset: "read-only"`。继续协调前检查回执中的 `cwd`、`workspace`、`agent_preset` 与 `permission_preset`。
-3. 用返回的会话 id 与请求 id 运行 `examples/collect-turn.mjs`。它会自动跟随 `events_read` 的分页和分片，并返回最终答案，不把原始 reasoning 与工具轨迹复制进控制端客户端的上下文。
+3. 用返回的会话地址与 `request_id` 调用 `turn_result`，直到 `state` 为 `ended`。每次调用最多等待 20 秒，并返回最终答案、结束原因与工具失败，不把原始 reasoning 与工具轨迹复制进控制端客户端的上下文；`blocked_on_approval` 表示该轮次正在等待 Web UI 中的决定。
 4. 让模型通过它自己的 subagent 工具创建一个 child，随后 `agents_list` 会显示该 child 及其 `parentId` 与 `depth`。
 5. `child_send` 返回 `message_id`，child 自己的日志在该次投递之后显示这条消息及其回答。
 6. 用同一个 `DSH_HOME` 重启 DSH 进程：`events_read` 仍返回已提交的事件，`agents_list` 仍列出该 child。

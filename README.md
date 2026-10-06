@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-mcp-control` serves the Model Context Protocol on the DSH Web listener so a same-machine MCP client can drive Sessions it knows by id. Its tools create or adopt a root Session, submit and cancel work, report what a Session is doing, list its durable subagent tree, deliver to a continuable child, and read the durable event log. Every call uses the native Session Controller, subagent runtime, and Workspace Registry: the endpoint owns no task state, starts no second listener, registers no model-facing tool, and never answers an approval. A deployment inserts it deliberately, and its bearer token is full control of every Session that instance can address.
+`dsh-mcp-control` serves the Model Context Protocol on the DSH Web listener so a same-machine MCP client can drive Sessions it knows by id. Its tools create or adopt a root Session, submit and cancel work, report what a Session is doing and what came of a prompt, list its durable subagent tree, deliver to a continuable child, and read the durable event log. Every call uses the native Session Controller, subagent runtime, and Workspace Registry: the endpoint owns no task state, starts no second listener, registers no model-facing tool, and never answers an approval. A deployment inserts it deliberately, and its bearer token is full control of every Session that instance can address.
 
 This repository is tested against DSH `0.2.0-rc.2`. Install this package in the Web profile before applying the overlay below; that release resolves external profile plugins without modifying the DSH runtime.
 
@@ -81,6 +81,7 @@ Every tool result carries the same object as `structuredContent` and as a `JSON.
 | `session_start` | `cwd`, `prompt`; optional `agent_preset`, `permission_preset`, `session_id`, `request_id` | `session_id`, `request_id`, `accepted`, resolved `cwd`, `workspace`, `agent_preset`, `permission_preset` |
 | `session_send` | `session_id`, `message`; optional `delivery` (`queue` or `steer`), `request_id` | `session_id`, `request_id`, `accepted` |
 | `session_cancel` | `session_id`; optional `clear_queue` | `session_id`, native `accepted`; `removed_queue_items` when clearing |
+| `turn_result` | `address`, `request_id`; optional `wait_ms` | `state`, `agent_status`, `turn`, `reason`, `final_message`, `diagnostics`, `pending_approvals`, below |
 | `session_status` | `address`, as for `events_read` | address ids, `agent_status`, `head_seq`, latest `turn`, waiting `queue`, `pending_approvals` |
 | `agents_list` | `root_session_id` | `root_session_id`, native durable `entries` with `parentId` and `depth` |
 | `child_send` | `parent_session_id`, `child_session_id`, `message`; optional `delivery`, `request_id` | both ids, `request_id`, `message_id`, `accepted` |
@@ -119,19 +120,27 @@ The client retrieves it through the same tool in chunk mode, concatenating base6
 
 `next_seq` never advances past an event that was not delivered whole, and the chunk result never advances the page cursor. A page that reports `oversized_event` therefore leaves `next_seq` at the caller's own `after_seq`; the client's cursor advances to the descriptor's `seq` only once the reassembled bytes verify. A requested `max_bytes` larger than the result budget is served as the largest chunk that budget admits, never as a reason to encode more of the event than the result can carry. A digest mismatch is refused as `mcp-control/event-changed`; the client re-reads the page for a fresh descriptor.
 
-The repository ships a compact collector at [`examples/collect-turn.mjs`](examples/collect-turn.mjs). Give it the `session_id` and `request_id` returned by `session_start` or `session_send`. It follows every page, verifies every oversized event before advancing, and prints only the target turn's final text, end reason, compact tool-failure diagnostics, and verified cursor. Raw reasoning, tool traces, and unrelated events never enter the caller's context. The exported `createSessionCollector` keeps its cursor private across successive request ids; the executable form starts at the protocol's initial `-1` cursor.
+### Getting a turn's result
 
-```sh
-DSH_MCP_CONTROL_URL=http://127.0.0.1:8931/mcp \
-DSH_MCP_CONTROL_TOKEN=... \
-DSH_MCP_CONTROL_SESSION_ID=S \
-DSH_MCP_CONTROL_REQUEST_ID=R \
-node ./examples/collect-turn.mjs
+`turn_result` answers the question an orchestrator actually asks — what came of the prompt it sent — without the raw log ever entering its context. Give it the `address` (as for `events_read`) and the `request_id` that `session_start`, `session_send`, or `child_send` returned:
+
+```json
+{"address":{"kind":"session","session_id":"S"},"request_id":"R","wait_ms":20000}
 ```
 
-A successful result is compact JSON such as `{"session_id":"S","request_id":"R","turn":1,"final_message":"done","reason":{"kind":"completed"},"diagnostics":[],"next_seq":31,"head_seq":31}`. `DSH_MCP_CONTROL_POLL_MS` and `DSH_MCP_CONTROL_TIMEOUT_MS` optionally control polling and the overall wait.
+The result names the prompt's `state`:
 
-### Failure codes
+| `state` | Meaning |
+|---|---|
+| `ended` | The turn closed: `reason` is its native end reason (`completed`, `aborted`, `error`, `interrupted`, …), `final_message` the last assistant text or `null`, and `diagnostics` the turn's tool failures |
+| `running` | The turn is still computing; call again |
+| `queued` | The prompt waits in the inbox; with `agent_status: "idle"` it is stranded and starts only when another prompt wakes the Agent |
+| `blocked_on_approval` | `pending_approvals` lists what a human must decide in the Web UI before the turn can continue |
+| `not_found` | Neither the log nor the live inbox holds that `request_id` |
+
+One call waits up to `wait_ms` (default 20000; `0` answers at once), capped below `requestTimeoutMs` so the call answers before its own deadline, and returns as soon as the turn ends or blocks; a stranded prompt is reported within a fraction of a second rather than after the full wait. It is woken by the Session's own events, keeps nothing between calls, and never activates a cold Session. Raw reasoning, tool traces, and unrelated events never appear; a final message too large for the result budget is shortened on a code-point boundary with `final_message_truncated: true`, and `final_message_seq` names the event `events_read` returns whole. Because it travels over the MCP connection the client already holds, it needs no shell access, network permission, or token in a sandboxed agent's command environment.
+
+### Failure codes### Failure codes
 
 Native failures keep their DSH code, message, and public details. The endpoint adds `mcp-control/cwd-not-found`, `mcp-control/cwd-not-directory`, `mcp-control/cwd-unavailable`, `mcp-control/cursor-ahead`, `mcp-control/event-changed`, `mcp-control/result-too-large`, `mcp-control/request-timeout`, `mcp-control/invalid-offset`, and `mcp-control/internal` for an exception with no public mapping. A call whose deadline expires after DSH may already have admitted the work reports `receipt: unknown` instead of a false refusal. Every result is measured by its complete UTF-8 JSON, text fallback and `structuredContent` together: a failure payload that does not fit degrades to `result-too-large` carrying the correlation fields the budget admits plus `details.omitted` naming the ones it dropped, and a rejected argument object is answered inside the same budget even when the offending key itself is longer than the budget — the shortened diagnostic states how many bytes it replaced.
 
@@ -165,7 +174,7 @@ This section explains the design behind the endpoint and points at the code that
 | [`src/status.ts`](src/status.ts) | `session_status` and the turn, inbox, and approval folds |
 | [`src/events.ts`](src/events.ts) | `events_read` paging, byte budgets, and chunk reassembly |
 | [`src/result.ts`](src/result.ts) | Result, failure, and per-call deadline handling |
-| [`examples/collect-turn.mjs`](examples/collect-turn.mjs) | Compact final-answer collection with private cursor and verified chunks |
+| [`src/turn-result.ts`](src/turn-result.ts) | `turn_result`: locating the prompt's turn, the bounded event-driven wait, and the compact result |
 | — | No runtime invariant companion is published: the plugin stores no durable or in-memory projection of its own, so every relationship it relays is already observable through the Session Controller, subagent runtime, and Session persistence it calls. |
 
 ### Request lifecycle

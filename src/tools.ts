@@ -18,6 +18,7 @@ import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
 import { checkCwd, isFullyQualifiedPath } from './paths.ts'
 import { registerSessionStatus, rpcIdOf } from './status.ts'
+import { registerTurnResult } from './turn-result.ts'
 import {
   boundedInputSchema,
   errorResult,
@@ -468,5 +469,6 @@ export function createControlServer(deps: ControlDeps): McpServer {
   registerChildInterrupt(server, deps)
   registerEventsRead(server, deps)
   registerSessionStatus(server, deps)
+  registerTurnResult(server, deps)
   return server
 }

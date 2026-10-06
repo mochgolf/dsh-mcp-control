@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-mcp-control` 在 DSH Web 监听器上提供 Model Context Protocol 服务，使同一台机器上的 MCP 客户端可以按 id 驱动它已经知道的会话。这些工具用于创建或采用根会话、提交与取消其工作、报告会话当前在做什么、列出其 durable subagent 树、向 continuable child 投递消息，以及读取 durable 事件日志。每次调用都使用原生 Session Controller、subagent 运行时与 Workspace Registry：该端点不拥有任务状态、不启动第二个监听器、不注册任何面向模型的工具，也从不代替用户回答审批。部署方主动插入该插件，其 bearer token 等同于对该实例可寻址的每个会话的完整控制权。
+`dsh-mcp-control` 在 DSH Web 监听器上提供 Model Context Protocol 服务，使同一台机器上的 MCP 客户端可以按 id 驱动它已经知道的会话。这些工具用于创建或采用根会话、提交与取消其工作、报告会话当前在做什么以及某条提示词得到了什么结果、列出其 durable subagent 树、向 continuable child 投递消息，以及读取 durable 事件日志。每次调用都使用原生 Session Controller、subagent 运行时与 Workspace Registry：该端点不拥有任务状态、不启动第二个监听器、不注册任何面向模型的工具，也从不代替用户回答审批。部署方主动插入该插件，其 bearer token 等同于对该实例可寻址的每个会话的完整控制权。
 
 本仓库以 DSH `0.2.0-rc.2` 为兼容测试基线。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件，无需修改 DSH runtime。
 
@@ -81,6 +81,7 @@ tool_timeout_sec = 30
 | `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset` |
 | `session_send` | `session_id`、`message`；可选 `delivery`（`queue` 或 `steer`）、`request_id` | `session_id`、`request_id`、`accepted` |
 | `session_cancel` | `session_id`；可选 `clear_queue` | `session_id`、原生 `accepted`；清空时附 `removed_queue_items` |
+| `turn_result` | `address`、`request_id`；可选 `wait_ms` | `state`、`agent_status`、`turn`、`reason`、`final_message`、`diagnostics`、`pending_approvals`，见下文 |
 | `session_status` | `address`，格式同 `events_read` | 地址 id、`agent_status`、`head_seq`、最新 `turn`、等待中的 `queue`、`pending_approvals` |
 | `agents_list` | `root_session_id` | `root_session_id`、带 `parentId` 与 `depth` 的原生 durable `entries` |
 | `child_send` | `parent_session_id`、`child_session_id`、`message`；可选 `delivery`、`request_id` | 两个 id、`request_id`、`message_id`、`accepted` |
@@ -119,19 +120,27 @@ tool_timeout_sec = 30
 
 `next_seq` 绝不会越过没有完整交付的事件，分片结果也绝不推进分页游标。因此返回 `oversized_event` 的分页会把 `next_seq` 留在调用方自己的 `after_seq` 上；只有当重组出的字节通过校验后，客户端游标才推进到 descriptor 的 `seq`。请求的 `max_bytes` 若大于结果预算，会按该预算允许的最大分片返回，而不会成为编码超过结果可承载范围的理由。摘要不符以 `mcp-control/event-changed` 拒绝；客户端重新读取分页以获得新的 descriptor。
 
-仓库随附紧凑收集器 [`examples/collect-turn.mjs`](examples/collect-turn.mjs)。把 `session_start` 或 `session_send` 返回的 `session_id` 与 `request_id` 交给它；它会遍历所有分页、在推进前校验每个超大事件，并且只输出目标轮次的最终文本、结束原因、紧凑的工具失败诊断和可信游标。原始 reasoning、工具轨迹与无关事件不会进入调用方上下文。导出的 `createSessionCollector` 会在连续的 request id 之间私有保存游标；直接执行时从协议规定的初始游标 `-1` 开始。
+### 获取轮次结果
 
-```sh
-DSH_MCP_CONTROL_URL=http://127.0.0.1:8931/mcp \
-DSH_MCP_CONTROL_TOKEN=... \
-DSH_MCP_CONTROL_SESSION_ID=S \
-DSH_MCP_CONTROL_REQUEST_ID=R \
-node ./examples/collect-turn.mjs
+`turn_result` 回答协调端真正关心的问题——它发出的提示词得到了什么结果——而原始日志不会进入它的上下文。传入 `address`（格式同 `events_read`）以及 `session_start`、`session_send` 或 `child_send` 返回的 `request_id`：
+
+```json
+{"address":{"kind":"session","session_id":"S"},"request_id":"R","wait_ms":20000}
 ```
 
-成功结果是紧凑 JSON，例如 `{"session_id":"S","request_id":"R","turn":1,"final_message":"done","reason":{"kind":"completed"},"diagnostics":[],"next_seq":31,"head_seq":31}`。可用 `DSH_MCP_CONTROL_POLL_MS` 与 `DSH_MCP_CONTROL_TIMEOUT_MS` 调整轮询间隔和总等待时间。
+结果用 `state` 说明该提示词所处的状态：
 
-### 失败码
+| `state` | 含义 |
+|---|---|
+| `ended` | 轮次已结束：`reason` 是原生结束原因（`completed`、`aborted`、`error`、`interrupted` 等），`final_message` 是最后一条 assistant 文本或 `null`，`diagnostics` 是该轮次的工具失败 |
+| `running` | 轮次仍在计算；请再次调用 |
+| `queued` | 提示词仍在收件箱中等待；若 `agent_status` 为 `"idle"`，它已滞留，只有其他提示词唤醒 Agent 时才会开始 |
+| `blocked_on_approval` | `pending_approvals` 列出需要人类在 Web UI 中作出的决定，之后轮次才能继续 |
+| `not_found` | 日志与 live 收件箱中都没有该 `request_id` |
+
+单次调用最多等待 `wait_ms`（默认 20000；`0` 立即作答），且上限低于 `requestTimeoutMs`，保证调用在自身截止时间之前作答；轮次一旦结束或被阻塞就立即返回，滞留的提示词会在不到一秒内报告，而不会等满整个时长。它由会话自身的事件唤醒，在调用之间不保存任何东西，也从不激活冷会话。原始 reasoning、工具轨迹与无关事件都不会出现；超出结果预算的最终消息会在码点边界截短并带上 `final_message_truncated: true`，`final_message_seq` 指出可由 `events_read` 完整读取的事件。由于它走客户端已持有的 MCP 连接，沙箱中的 agent 无需 shell 访问、网络权限，也无需在命令环境里提供 token。
+
+### 失败码### 失败码
 
 原生失败保留其 DSH code、message 与公开 details。端点新增 `mcp-control/cwd-not-found`、`mcp-control/cwd-not-directory`、`mcp-control/cwd-unavailable`、`mcp-control/cursor-ahead`、`mcp-control/event-changed`、`mcp-control/result-too-large`、`mcp-control/request-timeout`、`mcp-control/invalid-offset`，以及用于没有公开映射的异常的 `mcp-control/internal`。若某次调用的截止时间在 DSH 可能已经接收工作之后才到期，它会报告 `receipt: unknown`，而不是给出错误的拒绝。每个结果都按完整的 UTF-8 JSON 计量，text 兜底与 `structuredContent` 一并计入：装不下的失败载荷会退化为 `result-too-large`，保留预算容得下的关联字段，并用 `details.omitted` 列出被丢弃的字段；被拒绝的参数对象也会在同一预算内作答，即使违规字段名本身长于预算——被缩短的诊断会说明它替换掉了多少字节。
 
@@ -165,7 +174,7 @@ node ./examples/collect-turn.mjs
 | [`src/status.ts`](src/status.ts) | `session_status`，以及轮次、收件箱与审批的折叠 |
 | [`src/events.ts`](src/events.ts) | `events_read` 分页、字节预算与分片重组 |
 | [`src/result.ts`](src/result.ts) | 结果、失败与单次调用截止时间处理 |
-| [`examples/collect-turn.mjs`](examples/collect-turn.mjs) | 使用私有游标和已校验分片收集紧凑最终答案 |
+| [`src/turn-result.ts`](src/turn-result.ts) | `turn_result`：定位提示词所在轮次、有界的事件驱动等待与紧凑结果 |
 | — | 不发布运行时 invariant 伴随包：该插件不保存任何自己的持久化或内存投影，因此它转发的每种关系都已经可以通过它调用的 Session Controller、subagent 运行时与会话持久化观察到。 |
 
 ### 请求生命周期
