@@ -1,7 +1,7 @@
 /**
  * `session_status`: what a Session is doing right now, read without activating
- * it — whether its Agent is loaded and running, which prompts wait in its inbox,
- * and which approvals its open turn waits on. It distinguishes the states a
+ * it — whether its Agent is loaded and running, which prompts wait in its
+ * durable inbox, and which approvals its open turn waits on. It distinguishes the states a
  * caller polling a turn cannot tell apart from the log alone: a turn still
  * computing, a prompt stranded in the inbox after a cancel, and a turn blocked
  * on a human decision in the Web UI.
@@ -20,6 +20,8 @@ import {
   openingSnapshot,
   readTail,
   type Address,
+  type OpeningSnapshot,
+  type PendingPrompt,
 } from './log.ts'
 import { boundedInputSchema, failureResult, okWithinBudget, operationDeadline, type ControlDeps } from './result.ts'
 
@@ -28,6 +30,12 @@ const PREVIEW_CHARS = 200
 
 /** Queue entries one status result lists before reporting the rest as a count. */
 const MAX_QUEUE_ENTRIES = 50
+
+/** Pending approvals one result lists before reporting the rest as a count. */
+const MAX_APPROVALS = 20
+
+/** Characters kept from one free-text reason field. */
+export const MAX_REASON_CHARS = 500
 
 /** Live Agent state as the caller sees it; `not_loaded` means no Agent is attached to the Session. */
 export type AgentState = 'idle' | 'running' | 'not_loaded'
@@ -56,17 +64,16 @@ export interface TurnFacts {
   readonly reason?: Record<string, unknown>
 }
 
-/** The shape of an inbox message this module reads; the full type belongs to the Agent package. */
-interface InboxMessage {
-  readonly id: string
-  readonly source?: unknown
-  readonly content: readonly unknown[]
-}
-
 /** The client correlation id a message source carries, when it has one. */
 export function rpcIdOf(source: unknown): string | undefined {
   const rpcId = (source as { rpcId?: unknown } | null | undefined)?.rpcId
   return typeof rpcId === 'string' ? rpcId : undefined
+}
+
+/** The longest prefix of `text` within `chars` code points. */
+export function clip(text: string, chars: number): string {
+  const points = Array.from(text)
+  return points.length <= chars ? text : points.slice(0, chars).join('')
 }
 
 /** The text parts of one message's content, joined. */
@@ -84,24 +91,30 @@ export function agentStateOf(deps: ControlDeps, address: Address): AgentState {
 }
 
 /**
- * The prompts waiting in the addressed Session's live inbox, oldest first per
- * delivery list.
+ * The prompts waiting in the addressed Session's inbox at the snapshot's
+ * watermark. The durable inbox projection is read from the same observation as
+ * the log, so a prompt is never counted both queued and claimed, and prompts
+ * queued for an Agent that is not loaded are still reported; the live inbox is
+ * the fallback only where no projection is registered.
  * @param deps - plugin dependencies carrying the Agent registry.
  * @param address - the addressed Session.
- * @returns the waiting entries; empty when no Agent is loaded.
+ * @param snapshot - the opening observation of that address.
+ * @returns the waiting entries, steering prompts first.
  */
-export function queueOf(deps: ControlDeps, address: Address): QueueEntry[] {
-  const agent = deps.ctx.agents.get(addressedSessionId(address))
-  if (agent === undefined) return []
-  const entry = (delivery: QueueEntry['delivery']) => (message: InboxMessage): QueueEntry => ({
-    item_id: message.id,
-    delivery,
-    request_id: rpcIdOf(message.source) ?? null,
-    preview: Array.from(textOf(message.content)).slice(0, PREVIEW_CHARS).join(''),
+export function queueOf(deps: ControlDeps, address: Address, snapshot: OpeningSnapshot): QueueEntry[] {
+  const entry = (prompt: PendingPrompt): QueueEntry => ({
+    item_id: prompt.id,
+    delivery: prompt.delivery,
+    request_id: rpcIdOf(prompt.source) ?? null,
+    preview: clip(textOf(prompt.content), PREVIEW_CHARS),
   })
+  if (snapshot.inbox !== undefined) return snapshot.inbox.map(entry)
+  /* v8 ignore next 6 -- the Agent Loop registers the inbox projection wherever an Agent can hold an inbox. */
+  const inbox = deps.ctx.agents.get(addressedSessionId(address))?.inbox
+  if (inbox === undefined) return []
   return [
-    ...(agent.inbox.nextStep as readonly InboxMessage[]).map(entry('steer')),
-    ...(agent.inbox.nextTurn as readonly InboxMessage[]).map(entry('queue')),
+    ...inbox.nextStep.map(message => entry({ id: message.id, delivery: 'steer', source: message.source, content: message.content })),
+    ...inbox.nextTurn.map(message => entry({ id: message.id, delivery: 'queue', source: message.source, content: message.content })),
   ]
 }
 
@@ -164,6 +177,22 @@ export function pendingApprovals(events: readonly SessionWireEvent[], fromSeq: n
   return pending
 }
 
+/**
+ * Bound a list of pending approvals for one result: at most a fixed count, each
+ * reason clipped, and the number left out reported rather than hidden.
+ * @param approvals - the undecided approvals, oldest first.
+ * @returns the result fields carrying them.
+ */
+export function boundedApprovals(approvals: readonly PendingApproval[]): { pending_approvals: PendingApproval[]; pending_approvals_omitted?: number } {
+  return {
+    pending_approvals: approvals.slice(0, MAX_APPROVALS).map(approval => ({
+      ...approval,
+      ...(approval.reason === undefined ? {} : { reason: clip(approval.reason, MAX_REASON_CHARS) }),
+    })),
+    ...(approvals.length > MAX_APPROVALS ? { pending_approvals_omitted: approvals.length - MAX_APPROVALS } : {}),
+  }
+}
+
 /** Whether a suffix already contains the start of its latest turn. */
 function holdsTurnStart(events: readonly SessionWireEvent[]): boolean {
   return events.some(event => event.type === 'turn/start')
@@ -199,6 +228,7 @@ const statusOutputSchema = z.object({
   queue: z.array(queueEntrySchema),
   queue_omitted: z.number().optional(),
   pending_approvals: z.array(pendingApprovalSchema),
+  pending_approvals_omitted: z.number().optional(),
 })
 
 /**
@@ -213,7 +243,7 @@ export function registerSessionStatus(server: McpServer, deps: ControlDeps): voi
       title: 'Read a DSH session status',
       description:
         'Report what a root DSH session or one addressed subagent child is doing now, without activating it: agent_status ("running", "idle", or "not_loaded"), '
-        + 'the latest turn and whether it is still open, the prompts waiting in the live inbox with their request_id, and the approvals the open turn waits on. '
+        + 'the latest turn and whether it is still open, the prompts waiting in the durable inbox with their request_id (also for an agent that is not loaded), and the approvals the open turn waits on. '
         + 'A non-empty pending_approvals means a human must decide in the DSH Web UI before the turn can continue. '
         + 'A queued prompt on an idle agent does not start by itself: it runs when another prompt wakes the agent, or session_cancel with clear_queue removes it.',
       inputSchema: boundedInputSchema(deps, 'session_status', z.strictObject({ address: addressSchema })),
@@ -225,11 +255,9 @@ export function registerSessionStatus(server: McpServer, deps: ControlDeps): voi
       const address = nativeAddress(args.address)
       const correlation = addressCorrelation(args.address)
       try {
-        // The inbox is read before the watermark is taken, so a prompt claimed
-        // in between appears both queued and in the log rather than in neither.
-        const queue = queueOf(deps, args.address)
         const agentStatus = agentStateOf(deps, args.address)
         const snapshot = await openingSnapshot(deps, address, guard.signal)
+        const queue = queueOf(deps, args.address, snapshot)
         const events = await readTail(deps, address, snapshot.cursor, guard.signal, holdsTurnStart)
         const turn = latestTurn(events)
         return okWithinBudget(deps, {
@@ -239,7 +267,7 @@ export function registerSessionStatus(server: McpServer, deps: ControlDeps): voi
           turn: turn ?? null,
           queue: queue.slice(0, MAX_QUEUE_ENTRIES),
           ...(queue.length > MAX_QUEUE_ENTRIES ? { queue_omitted: queue.length - MAX_QUEUE_ENTRIES } : {}),
-          pending_approvals: turn?.open === true ? pendingApprovals(events, turn.start_seq) : [],
+          ...boundedApprovals(turn?.open === true ? pendingApprovals(events, turn.start_seq) : []),
         })
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, correlation)

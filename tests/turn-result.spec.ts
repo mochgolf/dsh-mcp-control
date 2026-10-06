@@ -4,6 +4,7 @@
  * Controller, and subagent runtime.
  */
 
+import { rmSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -134,6 +135,17 @@ describe('turn_result', () => {
     expect(performance.now() - started).toBeLessThan(5_000)
   })
 
+  it('counts the approvals it leaves out', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot({ script: ['hang'] })
+    await call(client, 'session_start', { cwd: harness.workspace, prompt: 'hold', session_id: 'many-asks', request_id: 'R1' })
+    const session = harness.ctx.sessions.get(SessionId('many-asks'))!
+    const append = session.append.bind(session) as (type: string, data: unknown) => void
+    for (let index = 0; index < 23; index += 1) append('approval/asked', { id: `approval-${String(index)}`, toolName: 'bash' })
+    const result = await turnResult(client, 'many-asks', 'R1', 0)
+    expect(result).toMatchObject({ state: 'blocked_on_approval', pending_approvals_omitted: 3 })
+    expect(result.pending_approvals).toHaveLength(20)
+  })
+
   it('reports tool failures of the turn as compact diagnostics', { timeout: 30_000 }, async () => {
     const { harness, client } = await boot({
       script: [toolCallResponse('call-1', 'no_such_tool', { path: 'x' }), textResponse('recovered')],
@@ -144,6 +156,35 @@ describe('turn_result', () => {
     const diagnostics = result.diagnostics as Array<{ seq: number; error: { name: string; code: string } }>
     expect(diagnostics).toHaveLength(1)
     expect(diagnostics[0]?.error).toMatchObject({ name: expect.any(String), code: expect.any(String) })
+  })
+
+  it('reports a prompt removed from the inbox before any turn ran it as discarded', { timeout: 60_000 }, async () => {
+    const first = await bootHarness({ script: ['hang', 'hang'], retainRoots: true })
+    harnesses.push(first)
+    const firstClient = await connectClient(`${first.baseUrl}/mcp`)
+    clients.push(firstClient)
+    await call(firstClient, 'session_start', { cwd: first.workspace, prompt: 'hold', session_id: 'dropped', request_id: 'R1' })
+    await call(firstClient, 'session_send', { session_id: 'dropped', message: 'cleared before it ran', request_id: 'R2' })
+    await call(firstClient, 'session_cancel', { session_id: 'dropped', clear_queue: true })
+    const agent = first.ctx.agents.get(SessionId('dropped'))!
+    await agent.whenIdle()
+    expect(await turnResult(firstClient, 'dropped', 'R2', 0)).toMatchObject({ state: 'discarded' })
+    // R3 wakes the Agent into a turn that holds; R4 waits behind it until shutdown.
+    await call(firstClient, 'session_send', { session_id: 'dropped', message: 'hold again', request_id: 'R3' })
+    await vi.waitFor(() => { expect(agent.status).toBe('running') })
+    await call(firstClient, 'session_send', { session_id: 'dropped', message: 'pending at shutdown', request_id: 'R4' })
+    expect(await turnResult(firstClient, 'dropped', 'R4', 0)).toMatchObject({ state: 'queued' })
+    await closeAll(clients.splice(clients.indexOf(firstClient), 1), harnesses.splice(harnesses.indexOf(first), 1))
+
+    // Shutting the Agent down durably cancels what was still pending.
+    const { client } = await boot({ workspace: first.workspace, persistenceRoot: first.persistenceRoot })
+    try {
+      expect(await turnResult(client, 'dropped', 'R4', 0)).toMatchObject({ state: 'discarded', agent_status: 'not_loaded' })
+      expect(await turnResult(client, 'dropped', 'R1', 0)).toMatchObject({ state: 'ended', reason: { kind: 'aborted' } })
+    } finally {
+      rmSync(first.workspace, { recursive: true, force: true })
+      rmSync(first.persistenceRoot, { recursive: true, force: true })
+    }
   })
 
   it('answers not_found for a request id neither the log nor the inbox holds', { timeout: 30_000 }, async () => {

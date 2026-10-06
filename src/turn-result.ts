@@ -36,13 +36,15 @@ import {
 } from './result.ts'
 import {
   agentStateOf,
+  boundedApprovals,
+  clip,
+  MAX_REASON_CHARS,
   pendingApprovals,
   queueOf,
   rpcIdOf,
   textOf,
   turnFacts,
   type AgentState,
-  type PendingApproval,
 } from './status.ts'
 
 /** Default bounded wait for one call, below a typical MCP client tool timeout. */
@@ -60,11 +62,8 @@ const COALESCE_MS = 20
 /** Tool failures one result reports before counting the rest. */
 const MAX_DIAGNOSTICS = 20
 
-/** Characters kept from one free-text reason field. */
-const MAX_REASON_CHARS = 500
-
 /** Where the prompt identified by `request_id` stands. */
-export type TurnState = 'ended' | 'running' | 'queued' | 'blocked_on_approval' | 'not_found'
+export type TurnState = 'ended' | 'running' | 'queued' | 'blocked_on_approval' | 'discarded' | 'not_found'
 
 /** One tool failure recorded in the target turn. */
 interface Diagnostic {
@@ -79,12 +78,6 @@ interface Evaluation {
   readonly agentStatus: AgentState
 }
 
-/** The longest prefix of `text` within `chars` code points. */
-function clip(text: string, chars: number): string {
-  const points = Array.from(text)
-  return points.length <= chars ? text : points.slice(0, chars).join('')
-}
-
 /** Where the target prompt sits in a log suffix: its message index and its turn's start index. */
 function locate(events: readonly SessionWireEvent[], requestId: string): { message: number; start: number } | undefined {
   const message = events.findLastIndex(event =>
@@ -92,6 +85,18 @@ function locate(events: readonly SessionWireEvent[], requestId: string): { messa
   if (message === -1) return undefined
   const start = events.findLastIndex((event, index) => index < message && event.type === 'turn/start')
   return { message, start }
+}
+
+/**
+ * Whether the log records the prompt entering the inbox. A prompt that entered
+ * it, was never claimed by a turn, and no longer waits there was discarded
+ * before it ran — by `clear_queue`, a cancel that clears the inbox, or the
+ * Agent's shutdown, which durably cancels whatever is still pending.
+ */
+function enteredInbox(events: readonly SessionWireEvent[], requestId: string): boolean {
+  return events.some(event => event.type === 'agent/inbox/spliced'
+    && ((event.data as { inserted?: unknown }).inserted as readonly { source?: unknown }[] | undefined)
+      ?.some(message => rpcIdOf(message.source) === requestId) === true)
 }
 
 /** Whether a suffix holds the target prompt and the start of the turn it entered. */
@@ -139,14 +144,6 @@ function diagnosticsOf(events: readonly SessionWireEvent[]): Diagnostic[] {
   return found
 }
 
-/** Bound the free-text fields of pending approvals. */
-function boundedApprovals(approvals: readonly PendingApproval[]): PendingApproval[] {
-  return approvals.slice(0, MAX_DIAGNOSTICS).map(approval => ({
-    ...approval,
-    ...(approval.reason === undefined ? {} : { reason: clip(approval.reason, MAX_REASON_CHARS) }),
-  }))
-}
-
 /**
  * Read where the prompt identified by `request_id` stands right now.
  * @param deps - plugin dependencies.
@@ -156,12 +153,13 @@ function boundedApprovals(approvals: readonly PendingApproval[]): PendingApprova
  * @returns the evaluation and the result value it produces.
  */
 async function evaluate(deps: ControlDeps, address: Address, requestId: string, signal: AbortSignal): Promise<Evaluation> {
-  // The inbox is read before the watermark, so a prompt claimed in between is
-  // reported queued once and found in the log on the next read, never missed.
-  const queued = queueOf(deps, address).some(entry => entry.request_id === requestId)
   const agentStatus = agentStateOf(deps, address)
   const native = nativeAddress(address)
   const snapshot = await openingSnapshot(deps, native, signal)
+  // The durable inbox shares the log's watermark, so a prompt is either still
+  // queued or already in the log at this cut, and one queued for an Agent that
+  // is not loaded is still found.
+  const queued = queueOf(deps, address, snapshot).some(entry => entry.request_id === requestId)
   const base = {
     ...addressCorrelation(address),
     request_id: requestId,
@@ -174,7 +172,9 @@ async function evaluate(deps: ControlDeps, address: Address, requestId: string, 
   const events = await readTail(deps, native, snapshot.cursor, signal, holdsTarget(requestId))
   const found = locate(events, requestId)
   if (found === undefined) {
-    return { state: 'not_found', agentStatus, value: { ...base, state: 'not_found', diagnostics: [] } }
+    // Without the target the tail read reached the log start, so this sees every insertion.
+    const state: TurnState = enteredInbox(events, requestId) ? 'discarded' : 'not_found'
+    return { state, agentStatus, value: { ...base, state, diagnostics: [] } }
   }
   /* v8 ignore next 4 -- the loop always opens a turn before it records the prompt entering it. */
   if (found.start === -1) {
@@ -215,7 +215,7 @@ async function evaluate(deps: ControlDeps, address: Address, requestId: string, 
       ...base,
       state,
       turn,
-      ...(approvals.length > 0 ? { pending_approvals: boundedApprovals(approvals) } : {}),
+      ...(approvals.length > 0 ? boundedApprovals(approvals) : {}),
       ...reported,
     },
   }
@@ -290,6 +290,7 @@ function watchSession(deps: ControlDeps, sessionId: SessionId): SessionWatch {
 /** Whether waiting longer can change the answer. */
 function settled(evaluation: Evaluation): boolean {
   return evaluation.state === 'ended'
+    || evaluation.state === 'discarded'
     || evaluation.state === 'not_found'
     || evaluation.state === 'blocked_on_approval'
     || evaluation.agentStatus === 'not_loaded'
@@ -306,7 +307,7 @@ const turnResultOutputSchema = z.object({
   parent_session_id: z.string().optional(),
   child_session_id: z.string().optional(),
   request_id: z.string(),
-  state: z.enum(['ended', 'running', 'queued', 'blocked_on_approval', 'not_found']),
+  state: z.enum(['ended', 'running', 'queued', 'blocked_on_approval', 'discarded', 'not_found']),
   agent_status: z.enum(['idle', 'running', 'not_loaded']),
   head_seq: z.number(),
   turn: z.number().optional(),
@@ -322,6 +323,7 @@ const turnResultOutputSchema = z.object({
     tool_name: z.string(),
     reason: z.string().optional(),
   })).optional(),
+  pending_approvals_omitted: z.number().optional(),
 })
 
 /**
@@ -338,7 +340,8 @@ export function registerTurnResult(server: McpServer, deps: ControlDeps): void {
         'Report the outcome of the turn that answered one accepted prompt, identified by the request_id that session_start, session_send, or child_send returned. '
         + 'state "ended" carries the turn-end reason (kind "completed", "aborted", "error", "interrupted", ...), the final assistant text, and compact tool failures; '
         + '"running" means the turn is still computing; "queued" means the prompt waits in the inbox — on an idle agent it will not start until another prompt wakes it; '
-        + '"blocked_on_approval" means a human must decide in the DSH Web UI; "not_found" means neither the log nor the inbox holds that request_id. '
+        + '"blocked_on_approval" means a human must decide in the DSH Web UI; "discarded" means the prompt entered the inbox but was removed before any turn ran it '
+        + '(session_cancel with clear_queue, or the agent shut down); "not_found" means the log never recorded that request_id. '
         + 'Each call waits up to wait_ms (default 20000, capped below the endpoint request timeout) and returns as soon as the turn ends or blocks, so call it again while the state is "running". '
         + 'Raw reasoning and tool traces are never returned; use events_read for the full log.',
       inputSchema: boundedInputSchema(deps, 'turn_result', z.strictObject({

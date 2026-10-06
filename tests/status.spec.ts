@@ -5,11 +5,12 @@
  * approval — against the real Agent Loop and Session Controller.
  */
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Client } from '@modelcontextprotocol/client'
 import { textResponse } from './support/mock-adapter.ts'
-import { bootHarness, closeAll, connectClient, textJson, type Harness } from './harness.ts'
+import { bootHarness, closeAll, connectClient, seedSession, textJson, type Harness } from './harness.ts'
 
 const harnesses: Harness[] = []
 const clients: Client[] = []
@@ -102,6 +103,46 @@ describe('session_status', () => {
     expect(after.pending_approvals).toEqual([{ id: 'approval-2', seq: expect.any(Number), tool_name: 'fs.write' }])
   })
 
+  it('bounds the approvals it lists and counts the rest', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot({ script: ['hang'] })
+    await call(client, 'session_start', { cwd: harness.workspace, prompt: 'hold', session_id: 'many', request_id: 'R1' })
+    const session = harness.ctx.sessions.get(SessionId('many'))!
+    const append = session.append.bind(session) as (type: string, data: unknown) => void
+    for (let index = 0; index < 25; index += 1) {
+      append('approval/asked', { id: `approval-${String(index)}`, toolName: 'bash', reason: 'r'.repeat(2_000) })
+    }
+    const listed = await status(client, 'many')
+    const approvals = listed.pending_approvals as Array<{ id: string; reason: string }>
+    expect(approvals).toHaveLength(20)
+    expect(approvals[0]?.id).toBe('approval-0')
+    expect(approvals.every(approval => approval.reason.length === 500)).toBe(true)
+    expect(listed.pending_approvals_omitted).toBe(5)
+  })
+
+  it('reports prompts left in the durable inbox of a Session whose Agent is not loaded', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot()
+    // A process that exits without shutting its Agent down leaves the pending
+    // insertion in the log with no cancellation after it.
+    await seedSession(harness, 'parked', (session) => {
+      const append = session.append.bind(session) as (type: string, data: unknown, options?: unknown) => void
+      append('turn/start', { turn: 1 })
+      append('user/message', createUserMessage({ content: [{ type: 'text', text: 'first' }], source: { kind: 'user', rpcId: 'R1' } as never }), { surfaceOp: 'append' })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      append('agent/inbox/spliced', {
+        target: 'next-turn',
+        start: 0,
+        inserted: [{ content: [{ type: 'text', text: 'still queued' }], source: { kind: 'user', rpcId: 'R2' }, role: 'user', id: 'parked-r2' }],
+      })
+    })
+    expect(await status(client, 'parked')).toMatchObject({
+      agent_status: 'not_loaded',
+      queue: [{ item_id: 'parked-r2', delivery: 'queue', request_id: 'R2', preview: 'still queued' }],
+    })
+    expect(await call(client, 'turn_result', { address: { kind: 'session', session_id: 'parked' }, request_id: 'R2' }))
+      .toMatchObject({ state: 'queued', agent_status: 'not_loaded' })
+    expect(harness.ctx.agents.get(SessionId('parked'))).toBeUndefined()
+  })
+
   it('reports a settled turn, and refuses an unknown Session without loading an Agent', { timeout: 30_000 }, async () => {
     const { harness, client } = await boot({ script: [textResponse('done')] })
     await call(client, 'session_start', { cwd: harness.workspace, prompt: 'finish', session_id: 'settled' })
@@ -138,6 +179,25 @@ describe('session_cancel clear_queue', () => {
     await call(client, 'session_send', { session_id: 'cleared', message: 'new task', request_id: 'R4' })
     await agent.whenIdle()
     expect(await recordedRequests(harness, 'cleared')).toEqual(['R1', 'R4'])
+  })
+
+  it('names the prompts it already removed when the interrupt itself fails', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot({ script: ['hang'] })
+    await call(client, 'session_start', { cwd: harness.workspace, prompt: 'hold', session_id: 'half', request_id: 'R1' })
+    await call(client, 'session_send', { session_id: 'half', message: 'queued', request_id: 'R2' })
+    vi.spyOn(harness.ctx.sessionController, 'cancel').mockImplementation(() => {
+      throw Object.assign(new Error('session "half" not found (not attached)'), {
+        isDSHRemoteError: true,
+        code: 'session/not-found',
+        details: { sessionId: 'half' },
+      })
+    })
+    const result = await client.callTool({ name: 'session_cancel', arguments: { session_id: 'half', clear_queue: true } })
+    expect(result.isError).toBe(true)
+    expect(textJson(result).error).toMatchObject({
+      code: 'session/not-found',
+      details: { session_id: 'half', removed_queue_items: [{ item_id: expect.any(String), request_id: 'R2' }] },
+    })
   })
 
   it('keeps the inbox by default, and the stranded prompt runs when a later prompt wakes the agent', { timeout: 30_000 }, async () => {
