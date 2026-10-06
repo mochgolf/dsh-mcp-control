@@ -59,6 +59,10 @@ A first check confirms the endpoint serves only the tools above and that a Sessi
 
 Steps 2 and 3 need no API key; the remaining steps need a working model route.
 
+## Codex worktrees
+
+A Codex task in worktree mode runs in a linked git worktree — a separate directory such as `~/.codex/worktrees/<id>/<repo>` with its own branch, sharing the main checkout's repository. Pass that directory as `cwd`: the DSH Session works in the same tree as the Codex task, and is never redirected into the main checkout. Because a DSH Workspace is one exact directory, the Session appears ungrouped; the receipt's `git_worktree` names the main checkout and its Workspace. To group each worktree in the Web UI instead, set `autoRegisterWorktrees: true` in the overlay's `config`; each worktree root then becomes its own Workspace, which you remove yourself once the worktree is gone. Under the `workspace-write` preset the Session can edit the worktree's files, but its git metadata lives in the main checkout, so the receipt warns that commits are likely to be denied — let Codex, which owns the worktree, commit the result.
+
 ## Security
 
 The token is full control of every Session this DSH instance can address by id — treat it like local shell access. The endpoint refuses any request that does not come from `127.0.0.1` on the Web instance's own port with the current credential, rejects forwarding headers and foreign origins, and never answers an approval, ask-user, or elicitation request. It is not built for remote, multi-user, or reverse-proxied exposure; keep the client-side environment as protected as the DSH process.

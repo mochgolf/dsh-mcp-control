@@ -235,6 +235,7 @@ function config(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     maxToolResultBytes: 4096,
     defaultChunkBytes: 2048,
     requestTimeoutMs: 25_000,
+    autoRegisterWorktrees: false,
     ...overrides,
   }
 }

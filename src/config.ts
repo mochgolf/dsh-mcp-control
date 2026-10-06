@@ -33,6 +33,8 @@ export interface Config {
   readonly defaultChunkBytes?: number
   /** Ceiling on one MCP call, excluding the lifetime of work DSH already accepted. @default 25000 */
   readonly requestTimeoutMs?: number
+  /** Register an unregistered linked git worktree as its own Workspace when `session_start` names its root. @default false */
+  readonly autoRegisterWorktrees?: boolean
 }
 
 /** Complete config after schemastery applies every field default. */
@@ -48,6 +50,7 @@ export const Config: z<Config> = z.object({
   maxToolResultBytes: z.number().step(1).min(MIN_RESULT_BYTES).max(Number.MAX_SAFE_INTEGER).default(1048576),
   defaultChunkBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(65536),
   requestTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(25000),
+  autoRegisterWorktrees: z.boolean().default(false),
 })
 
 /**

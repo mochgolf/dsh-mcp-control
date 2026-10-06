@@ -8,6 +8,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { basename } from 'node:path'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -16,7 +17,7 @@ import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
-import { checkCwd, isFullyQualifiedPath } from './paths.ts'
+import { checkCwd, gitLayoutOf, isFullyQualifiedPath, isWithin, type GitLayout, type WorktreeFacts } from './paths.ts'
 import { registerSessionStatus, rpcIdOf } from './status.ts'
 import { registerTurnResult } from './turn-result.ts'
 import {
@@ -59,12 +60,70 @@ const promptReceiptSchema = z.object({
 })
 
 /** `session_start` receipt with the project context DSH actually selected. */
+const workspaceRefSchema = z.object({ id: z.string(), title: z.string() })
+
+/** One advisory about the context the Session was started in; the start itself succeeded. */
+const warningSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  paths: z.array(z.string()).optional(),
+})
+
 const startReceiptSchema = promptReceiptSchema.extend({
   cwd: z.string(),
-  workspace: z.object({ id: z.string(), title: z.string() }).nullable(),
+  workspace: workspaceRefSchema.nullable(),
+  workspace_created: z.literal(true).optional(),
   agent_preset: z.string().nullable(),
   permission_preset: z.string(),
+  git_worktree: z.object({
+    root: z.string(),
+    main_path: z.string().nullable(),
+    branch: z.string().nullable(),
+    main_workspace: workspaceRefSchema.nullable(),
+  }).nullable(),
+  warnings: z.array(warningSchema),
 })
+
+/** One receipt advisory. */
+type Warning = z.infer<typeof warningSchema>
+
+/** Display title for a Workspace registered for a linked worktree: its repository and branch. */
+function worktreeTitle(worktree: WorktreeFacts): string {
+  return `${basename(worktree.mainPath ?? worktree.root)} · ${worktree.branch ?? basename(worktree.root)}`
+}
+
+/**
+ * Warn when the repository's metadata lies outside the directory a
+ * workspace-write Session may modify: its file edits succeed, but git commands
+ * that write the index, refs, or objects are denied. This holds for every
+ * linked worktree, whose metadata lives in the main repository, and for a
+ * subdirectory of an ordinary checkout.
+ * @param deps - plugin dependencies carrying the permission presets.
+ * @param layout - the git layout of the Session's directory.
+ * @param cwd - the Session's canonical working directory.
+ * @param preset - the Session's effective permission preset.
+ * @returns the advisory, when one applies.
+ */
+function gitWriteWarning(deps: ControlDeps, layout: GitLayout | undefined, cwd: string, preset: string): Warning | undefined {
+  if (layout === undefined) return undefined
+  let sandbox: string | undefined
+  try {
+    sandbox = deps.ctx.permissionPresets.resolve(preset).sandbox
+  } catch {
+    // A derived "custom" state names no bundle; its sandbox is not knowable here.
+    sandbox = undefined
+  }
+  if (sandbox !== 'workspace-write') return undefined
+  const outside = layout.metadataDirs.filter(dir => !isWithin(cwd, dir))
+  if (outside.length === 0) return undefined
+  return {
+    code: 'git-metadata-outside-cwd',
+    message: 'This working tree\'s git metadata lies outside cwd, beyond what a workspace-write Session may modify: the Session can edit files, '
+      + 'but git commands that write the repository (add, commit, checkout, stash) are likely to be denied. '
+      + 'Let the client that owns this checkout commit, or choose a permission preset with wider write access.',
+    paths: outside,
+  }
+}
 
 /** Mint the client correlation identity when the caller did not supply one. */
 function resolveRequestId(supplied: string | undefined): SessionRequestId {
@@ -121,6 +180,8 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         + 'cwd selects project context and Workspace grouping and must already exist as a directory; a missing or mistyped path is refused with stage "cwd" instead of being created. '
         + 'Using a temporary directory creates an ungrouped temporary context and does not enforce read-only access. '
         + 'If the directory belongs to a registered DSH workspace, attach the session there; otherwise leave it ungrouped. '
+        + 'A linked git worktree (such as a Codex worktree) keeps its own directory and is never moved into its main checkout\'s workspace; '
+        + 'git_worktree names that main checkout and its workspace, and warnings explain when git commits will be denied by the sandbox. '
         + 'Omit agent_preset to use the deployment\'s configured default; set it only as an intentional, known override. '
         + 'Set permission_preset to a native DSH preset such as "read-only"; it is applied before the first prompt, while cwd still names the real project. '
         + 'Returns once DSH accepts the prompt and never waits for the turn to finish. '
@@ -147,6 +208,9 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       let sessionId: SessionId
       let resolvedCwd = args.cwd
       let workspaceReceipt: { id: string; title: string } | null = null
+      let workspaceCreated = false
+      let mainWorkspace: { id: string; title: string } | null = null
+      const warnings: Warning[] = []
       let agentPreset: string | null = null
       let permissionPreset: string
       // Session creation makes a missing directory, so a mistyped or removed
@@ -166,6 +230,14 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, { request_id: requestId, stage: 'cwd' })
       }
+      // Repository facts only inform the receipt; a layout that cannot be read omits them.
+      let layout: GitLayout | undefined
+      try {
+        layout = await withinDeadline(gitLayoutOf(canonicalCwd).catch(() => undefined), guard.signal)
+      } catch (error: unknown) {
+        return failureResult(deps, error, guard.signal, { request_id: requestId, stage: 'cwd' })
+      }
+      const worktree = layout?.worktree
       // The identity is chosen here rather than inside the controller, because a
       // create that outlives the deadline can still finish: a session nobody can
       // name is unreachable through an interface with no enumeration. A caller's
@@ -177,10 +249,31 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
           : derivedSessionId(args.request_id, canonicalCwd, args.prompt)
       try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
-        const workspace = await withinDeadline(
+        let workspace = await withinDeadline(
           deps.ctx.workspaceRegistry.resolveByPath(args.cwd).catch(() => undefined),
           guard.signal,
         )
+        if (worktree?.mainPath !== undefined && worktree.mainPath !== null) {
+          const main = await withinDeadline(
+            deps.ctx.workspaceRegistry.resolveByPath(worktree.mainPath).catch(() => undefined),
+            guard.signal,
+          )
+          mainWorkspace = main === undefined ? null : { id: main.id, title: main.title }
+        }
+        // Only the worktree's own root can be its Workspace: membership requires
+        // the Session's directory to equal the Workspace path exactly.
+        if (workspace === undefined && deps.config.autoRegisterWorktrees && worktree?.root === canonicalCwd) {
+          try {
+            workspace = await withinDeadline(deps.ctx.workspaceRegistry.create(canonicalCwd, worktreeTitle(worktree)), guard.signal)
+            workspaceCreated = true
+          } catch (error: unknown) {
+            if (guard.signal.aborted) throw error
+            warnings.push({
+              code: 'workspace-registration-failed',
+              message: 'The worktree could not be registered as a Workspace; the Session was started ungrouped.',
+            })
+          }
+        }
         const created = await withinDeadline(deps.ctx.sessionController.create({
           ...(workspace === undefined ? { cwd: args.cwd } : { workspaceId: workspace.id }),
           sessionId: attempted,
@@ -205,6 +298,8 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
           deps.ctx.permissionPresets.set(session, args.permission_preset)
         }
         permissionPreset = deps.ctx.permissionPresets.current(session)
+        const gitWarning = gitWriteWarning(deps, layout, canonicalCwd, permissionPreset)
+        if (gitWarning !== undefined) warnings.push(gitWarning)
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, { ...correlation, stage: 'permission' })
       }
@@ -226,8 +321,13 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         accepted: true,
         cwd: resolvedCwd,
         workspace: workspaceReceipt,
+        ...(workspaceCreated ? { workspace_created: true } : {}),
         agent_preset: agentPreset,
         permission_preset: permissionPreset,
+        git_worktree: worktree === undefined
+          ? null
+          : { root: worktree.root, main_path: worktree.mainPath, branch: worktree.branch, main_workspace: mainWorkspace },
+        warnings,
       })
     },
   )

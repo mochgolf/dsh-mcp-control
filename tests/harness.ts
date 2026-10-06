@@ -9,9 +9,9 @@
  * @module @mochgolf/dsh-mcp-control
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -113,8 +113,10 @@ export interface HarnessOptions {
 export async function bootHarness(options: HarnessOptions = {}): Promise<Harness> {
   const ownedWorkspace = options.workspace === undefined
   const ownedPersistence = options.persistenceRoot === undefined
-  const workspace = options.workspace ?? mkdtempSync(join(tmpdir(), 'dsh-mcp-control-ws-'))
-  const persistenceRoot = options.persistenceRoot ?? mkdtempSync(join(tmpdir(), 'dsh-mcp-control-log-'))
+  // Canonical roots keep path comparisons exact where the temp directory is a
+  // symlink (macOS /var) or an 8.3 short name (Windows).
+  const workspace = options.workspace ?? realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mcp-control-ws-')))
+  const persistenceRoot = options.persistenceRoot ?? realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-mcp-control-log-')))
   const ctx = new Context()
   /** Remove the roots this boot created; a root supplied by the caller is never this boot's to remove. */
   const removeOwnedRoots = (): void => {
@@ -138,23 +140,51 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
       resolve: async () => (token === undefined ? undefined : { value: token, source: 'test' }),
     } as never)
 
-    const workspaceSessionIds: SessionId[] = []
-    const registeredWorkspace = options.registerWorkspace === true
-      ? {
-          id: WorkspaceId('workspace-fixture'),
-          path: workspace,
-          title: 'fixture workspace',
-          get sessionIds(): readonly SessionId[] { return workspaceSessionIds },
-          async attachSession(sessionId: SessionId): Promise<void> {
-            if (!workspaceSessionIds.includes(sessionId)) workspaceSessionIds.unshift(sessionId)
-          },
-        }
-      : undefined
+    // A registry with the real one's path semantics: canonical-path identity,
+    // a rejected lookup for a missing path, and create returning the existing
+    // Workspace for a path it already owns.
+    const canonical = (path: string): string | undefined => {
+      try {
+        return realpathSync.native(path)
+      } catch {
+        return undefined
+      }
+    }
+    const fixtureWorkspace = (id: string, path: string, title: string) => {
+      const sessionIds: SessionId[] = []
+      return {
+        id: WorkspaceId(id),
+        path,
+        title,
+        get sessionIds(): readonly SessionId[] { return sessionIds },
+        async attachSession(sessionId: SessionId): Promise<void> {
+          if (!sessionIds.includes(sessionId)) sessionIds.unshift(sessionId)
+        },
+      }
+    }
+    const workspaces: Array<ReturnType<typeof fixtureWorkspace>> = []
+    if (options.registerWorkspace === true) workspaces.push(fixtureWorkspace('workspace-fixture', workspace, 'fixture workspace'))
+    const owning = (path: string) => {
+      const target = canonical(path)
+      return target === undefined ? undefined : workspaces.find(entry => canonical(entry.path) === target)
+    }
     ctx.provide('workspaceRegistry', {
       archivedSessionIds: [],
-      resolveByPath: async (path: string) => registeredWorkspace?.path === path ? registeredWorkspace : undefined,
-      get: (id: string) => registeredWorkspace?.id === id ? registeredWorkspace : undefined,
-      list: () => registeredWorkspace === undefined ? [] : [registeredWorkspace],
+      resolveByPath: async (path: string) => {
+        if (canonical(path) === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
+        return owning(path)
+      },
+      get: (id: string) => workspaces.find(entry => entry.id === id),
+      list: () => [...workspaces],
+      create: async (path: string, title?: string) => {
+        const existing = owning(path)
+        if (existing !== undefined) return existing
+        const target = canonical(path)
+        if (target === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
+        const created = fixtureWorkspace(`workspace-${String(workspaces.length + 1)}`, target, title ?? basename(target))
+        workspaces.unshift(created)
+        return created
+      },
     } as never)
 
     const permissionBySession = new WeakMap<Session, string>()
