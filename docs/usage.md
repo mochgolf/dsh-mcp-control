@@ -40,6 +40,8 @@ startup_timeout_sec = 10
 tool_timeout_sec = 30
 ```
 
+Keep `tool_timeout_sec` above the endpoint's `requestTimeoutMs` (25 s by default), so a slow call is answered — with its outcome or an explicit `request-timeout` — before the client gives up on it, and keep the token in `bearer_token_env_var` rather than a literal `Authorization` header in the client's config file.
+
 The client lists seven tools: `session_start`, `session_send`, `session_cancel`, `agents_list`, `child_send`, `child_interrupt`, and `events_read`. The [package README](../README.md) owns their inputs, results, error codes, and the page/chunk form of `events_read`.
 
 `accepted: true` means DSH admitted the work — not that a turn finished. A `child_send` needs the child's direct parent to be live; the endpoint refuses a cold parent instead of resuming it.

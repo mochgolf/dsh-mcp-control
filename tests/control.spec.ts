@@ -5,7 +5,7 @@
  * and every refusal is produced by the real native implementation.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -13,6 +13,7 @@ import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { Client } from '@modelcontextprotocol/client'
 import { isFullyQualifiedPath } from '../src/paths.ts'
+import { derivedSessionId } from '../src/tools.ts'
 import { textResponse } from './support/mock-adapter.ts'
 import {
   bootHarness,
@@ -281,6 +282,50 @@ describe('session_start', () => {
     // one DSH is creating: a retry can adopt it instead of starting a second.
     expect(attempted).toBe(minted)
     await vi.waitFor(() => { expect(harness.ctx.sessions.get(SessionId(minted))).toBeDefined() })
+  })
+
+  it('derives one Session from request_id, cwd, and prompt when no session_id is supplied', { timeout: 30_000 }, async () => {
+    const harness = await boot({ script: [textResponse('only once'), textResponse('another task')] })
+    const client = await clientFor(harness)
+    const args = { cwd: harness.workspace, prompt: 'do the task', request_id: 'idempotent-start' }
+    const first = await call(client, 'session_start', args)
+    const retry = await call(client, 'session_start', args)
+    expect(first.session_id).toBe(derivedSessionId('idempotent-start', realpathSync(harness.workspace), 'do the task'))
+    expect(retry.session_id).toBe(first.session_id)
+    await harness.ctx.agents.get(SessionId(String(first.session_id)))!.whenIdle()
+    const prompts = (await eventsOf(harness, String(first.session_id)))
+      .filter(event => event.type === 'user/message' && rpcIdOf(event) === 'idempotent-start')
+    expect(prompts).toHaveLength(1)
+    // A reused correlation id that carries a different task never lands in the old Session.
+    const other = await call(client, 'session_start', { ...args, prompt: 'a different task' })
+    expect(other.session_id).not.toBe(first.session_id)
+  })
+
+  it('adopts the first attempt\'s Session when the client gave up before the receipt arrived', { timeout: 30_000 }, async () => {
+    const harness = await boot({ script: [textResponse('ran once')] })
+    const client = await clientFor(harness)
+    const real = harness.ctx.sessionController.create.bind(harness.ctx.sessionController)
+    const attempted: string[] = []
+    vi.spyOn(harness.ctx.sessionController, 'create').mockImplementation(async (request) => {
+      attempted.push(String(request.sessionId))
+      if (attempted.length === 1) await new Promise(resolve => setTimeout(resolve, 1_000))
+      return await real(request)
+    })
+    const args = { cwd: harness.workspace, prompt: 'do the task', request_id: 'lost-receipt' }
+    // The client's own tool timeout fires long before the server-side deadline.
+    await expect(client.callTool({ name: 'session_start', arguments: args }, { timeout: 200 })).rejects.toThrow()
+    const retry = await call(client, 'session_start', args)
+    // The abandoned first call still finishes on the server and submits its prompt.
+    await vi.waitFor(async () => {
+      expect(attempted).toHaveLength(2)
+      const agent = harness.ctx.agents.get(SessionId(String(retry.session_id)))
+      expect(agent?.status).toBe('idle')
+    }, { timeout: 5_000 })
+    await new Promise(resolve => setTimeout(resolve, 1_200))
+    expect(new Set(attempted)).toEqual(new Set([retry.session_id]))
+    const prompts = (await eventsOf(harness, String(retry.session_id)))
+      .filter(event => event.type === 'user/message' && rpcIdOf(event) === 'lost-receipt')
+    expect(prompts).toHaveLength(1)
   })
 
   it('adopts an existing session id for the same directory and refuses a conflicting one', { timeout: 30_000 }, async () => {
