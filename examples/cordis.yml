@@ -20,3 +20,6 @@
       name: '@mochgolf/dsh-mcp-control'
       config:
         tokenRef: DSH_MCP_CONTROL_TOKEN
+        # Give each linked git worktree (such as a Codex worktree) its own
+        # Workspace instead of leaving its Sessions ungrouped.
+        # autoRegisterWorktrees: true

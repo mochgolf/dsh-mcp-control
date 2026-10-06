@@ -51,6 +51,7 @@ DSH_MCP_CONTROL_TOKEN=... dsh web --patch examples/cordis.yml --host 127.0.0.1 -
 | `maxToolResultBytes` | `1048576` | 单个完整工具结果（含其 JSON 文本副本）的上限；最小 `4096` |
 | `defaultChunkBytes` | `65536` | 省略 `max_bytes` 时单个分片返回的原始事件字节数 |
 | `requestTimeoutMs` | `25000` | 单次 MCP 调用的上限，不含 DSH 已接收之后的工作；最大 `2147483647`，即 Node 可调度的最大延时 |
+| `autoRegisterWorktrees` | `false` | 当 `session_start` 指向某个链接 git 工作树的根目录且其尚未登记时，把它登记为独立的工作区 |
 
 只有当 WebServer 绑定 `127.0.0.1`、凭据解析出非空值、配置合法且没有其他精确路由占用 `path` 时，端点才会加载；其他情况一律让插件激活失败，而不是退化成匿名或半配置的端点。
 
@@ -78,7 +79,7 @@ tool_timeout_sec = 30
 
 | 工具 | 输入 | 结果 |
 |---|---|---|
-| `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset` |
+| `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset`、`git_worktree`、`warnings` |
 | `session_send` | `session_id`、`message`；可选 `delivery`（`queue` 或 `steer`）、`request_id` | `session_id`、`request_id`、`accepted` |
 | `session_cancel` | `session_id`；可选 `clear_queue` | `session_id`、原生 `accepted`；清空时附 `removed_queue_items` |
 | `turn_result` | `address`、`request_id`；可选 `wait_ms` | `state`、`agent_status`、`turn`、`reason`、`final_message`、`diagnostics`、`pending_approvals`，见下文 |
@@ -88,7 +89,7 @@ tool_timeout_sec = 30
 | `child_interrupt` | `parent_session_id`、`child_session_id` | 两个 id、原生 `accepted` |
 | `events_read` | 下文的分页或分片请求 | 下文的分页或分片结果 |
 
-`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。`cwd` 必须是指向已存在目录的完全限定路径——Windows 上须为带盘符或 UNC 的路径，不能是 `\repo`、`/home/me/repo` 这类会按 DSH 进程当前盘符解析的根相对路径。目录在调用 DSH 之前完成检查，因为会话创建会把缺失的目录直接建出来并在其中开始工作：不存在的路径以 `mcp-control/cwd-not-found` 拒绝，文件以 `mcp-control/cwd-not-directory` 拒绝，两者都带 `stage: "cwd"`。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。未提供 `session_id` 但提供了 `request_id` 时，会话 id 由该 `request_id`、规范化后的 `cwd` 与提示词派生，因此首次回执没有送达的重试——客户端自己的工具超时触发了，或用户中断了调用——会采用首次尝试已创建的会话，且不会重复提交提示词；每次新建都应传入新的 UUID，重试时原样复用。两者都不提供时，仍随机生成 id。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。
+`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。`cwd` 必须是指向已存在目录的完全限定路径——Windows 上须为带盘符或 UNC 的路径，不能是 `\repo`、`/home/me/repo` 这类会按 DSH 进程当前盘符解析的根相对路径。目录在调用 DSH 之前完成检查，因为会话创建会把缺失的目录直接建出来并在其中开始工作：不存在的路径以 `mcp-control/cwd-not-found` 拒绝，文件以 `mcp-control/cwd-not-directory` 拒绝，两者都带 `stage: "cwd"`。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组；除非启用 `autoRegisterWorktrees`，端点不会创建工作区。链接 git 工作树——Codex 工作树任务所在的目录——与其主检出是不同的目录，而工作区成员关系要求路径完全一致，因此其会话保持未分组，而不会被挪进主检出的工作区：那样主检出的路径会取代 `cwd`，工作也会落进主检出。回执中的 `git_worktree` 给出工作树 `root`、`main_path`、`branch`（游离 HEAD 时为 `null`），以及为该主检出登记的 `main_workspace`。设置 `autoRegisterWorktrees: true` 时，工作树根目录本身会被登记为标题为 `<仓库> · <分支>` 的工作区，会话挂载其下；子目录永远不会被登记，工作树删除后该工作区仍会保留。当实际 preset 为 `workspace-write`、而仓库元数据位于 `cwd` 之外时（每个链接工作树以及检出的任意子目录都是如此），`warnings` 会带上 `git-metadata-outside-cwd`：会话可以在其中修改文件，但写入仓库的 git 命令很可能被拒绝，因此应由拥有该工作树的客户端提交。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。未提供 `session_id` 但提供了 `request_id` 时，会话 id 由该 `request_id`、规范化后的 `cwd` 与提示词派生，因此首次回执没有送达的重试——客户端自己的工具超时触发了，或用户中断了调用——会采用首次尝试已创建的会话，且不会重复提交提示词；每次新建都应传入新的 UUID，重试时原样复用。两者都不提供时，仍随机生成 id。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。
 
 `session_status` 在不激活会话的前提下报告它当前在做什么：`agent_status`（`running`、`idle` 或 `not_loaded`）、最新 `turn` 及其是否仍未结束、live 收件箱中每条仍在等待的提示词及其 `request_id`，以及未结束轮次正在等待的 `pending_approvals`。它能区分只读日志的调用者分辨不出的三种状态：轮次仍在计算、轮次被只有人类才能在 Web UI 中作出的决定阻塞、提示词滞留在收件箱中。滞留的提示词不会自行开始：`session_cancel` 默认保留等待中的提示词，而之后任何一条提示词唤醒 Agent 时它们就会立即执行，因此需要传入 `clear_queue: true`，在中断之前通过控制器自身的队列修改把它们移除。
 
@@ -219,6 +220,7 @@ tool_timeout_sec = 30
 - **审批仍留在 Web 界面** —— 端点从不回答 approval、ask-user 或 elicitation 请求，因此需要人工应答的任务会等待人类，并不是无人值守的。
 - **冷的直接 parent 会阻塞 child 控制** —— `child_send` 以 `subagent/parent-unavailable` 拒绝，而不是恢复 parent；通过其自身入口恢复 parent 是调用方的步骤。
 - **装不下的结果被拒绝，而不是分页** —— 超过结果预算的单个事件可通过分片模式取回，但仅分页 header 或 `agents_list` 树本身超过预算时返回 `mcp-control/result-too-large`；该树没有分页模式。
+- **工作树会话默认不分组** —— 工作区成员关系是路径完全匹配，因此链接工作树的会话永远不会加入其主检出的工作区；`autoRegisterWorktrees` 改为给每个工作树根目录建立独立的工作区，而工作树删除时这些工作区不会随之移除。
 - **进程退出会停止计算** —— 持久性属于会话日志；重启读取的是已提交的内容，运行中的工作不会被端点恢复。
 
 <a id="dev-note"></a>
