@@ -84,7 +84,7 @@ tool_timeout_sec = 30
 | `child_interrupt` | `parent_session_id`、`child_session_id` | 两个 id、原生 `accepted` |
 | `events_read` | 下文的分页或分片请求 | 下文的分页或分片结果 |
 
-`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
+`session_start` 要求把 MCP 客户端的真实项目目录作为 `cwd`：该值决定 DSH 项目上下文与工作区归组；临时目录只会产生未分组的临时上下文，并不能实施只读限制。`cwd` 必须是指向已存在目录的完全限定路径——Windows 上须为带盘符或 UNC 的路径，不能是 `\repo`、`/home/me/repo` 这类会按 DSH 进程当前盘符解析的根相对路径。目录在调用 DSH 之前完成检查，因为会话创建会把缺失的目录直接建出来并在其中开始工作：不存在的路径以 `mcp-control/cwd-not-found` 拒绝，文件以 `mcp-control/cwd-not-directory` 拒绝，两者都带 `stage: "cwd"`。它在创建前用现有 Workspace Registry 解析 `cwd`。规范路径完全匹配时，会话会挂载到该工作区；目录未登记或当前不可解析时，会话保持未分组，端点从不创建工作区。省略 `agent_preset` 才会使用部署默认值；只在有意覆盖且已知名称时传入。需要明确权限时，把工具 schema 公布的原生名称传给 `permission_preset`；例如 `read-only` 会限制访问，同时保留真实项目 `cwd`。该 preset 在创建前完成校验，并在首条提示词之前应用。回执报告解析后的 `cwd`、已挂载的 `workspace`（否则为 `null`）、实际 `agent_preset`（否则为 `null`）与实际 `permission_preset`，调用者可立即发现上下文错误。当传入的 `session_id` 已存在于该目录时，`session_start` 采用该会话；与既有会话冲突时拒绝。会话 id 由插件在调用 DSH 之前自行选定，因此即使 create 超过了本次调用的截止时间，失败结果仍会在 `details.session_id` 与 `stage: "create"` 中报告该 id：该会话可能已经存在，复用报告出的 id 会采用它，而不是再建一个。`stage: "permission"` 失败表示会话已经创建，但提示词尚未提交。提供 `request_id` 会把重试关联到首次尝试已持久化的那条消息，但它只是关联，不是 exactly-once 保证：插件自身从不重试。`agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
 
 ### 读取 durable 事件
 
@@ -126,7 +126,7 @@ node ./examples/collect-turn.mjs
 
 ### 失败码
 
-原生失败保留其 DSH code、message 与公开 details。端点新增 `mcp-control/cursor-ahead`、`mcp-control/event-changed`、`mcp-control/result-too-large`、`mcp-control/request-timeout`、`mcp-control/invalid-offset`，以及用于没有公开映射的异常的 `mcp-control/internal`。若某次调用的截止时间在 DSH 可能已经接收工作之后才到期，它会报告 `receipt: unknown`，而不是给出错误的拒绝。每个结果都按完整的 UTF-8 JSON 计量，text 兜底与 `structuredContent` 一并计入：装不下的失败载荷会退化为 `result-too-large`，保留预算容得下的关联字段，并用 `details.omitted` 列出被丢弃的字段；被拒绝的参数对象也会在同一预算内作答，即使违规字段名本身长于预算——被缩短的诊断会说明它替换掉了多少字节。
+原生失败保留其 DSH code、message 与公开 details。端点新增 `mcp-control/cwd-not-found`、`mcp-control/cwd-not-directory`、`mcp-control/cwd-unavailable`、`mcp-control/cursor-ahead`、`mcp-control/event-changed`、`mcp-control/result-too-large`、`mcp-control/request-timeout`、`mcp-control/invalid-offset`，以及用于没有公开映射的异常的 `mcp-control/internal`。若某次调用的截止时间在 DSH 可能已经接收工作之后才到期，它会报告 `receipt: unknown`，而不是给出错误的拒绝。每个结果都按完整的 UTF-8 JSON 计量，text 兜底与 `structuredContent` 一并计入：装不下的失败载荷会退化为 `result-too-large`，保留预算容得下的关联字段，并用 `details.omitted` 列出被丢弃的字段；被拒绝的参数对象也会在同一预算内作答，即使违规字段名本身长于预算——被缩短的诊断会说明它替换掉了多少字节。
 
 -----
 

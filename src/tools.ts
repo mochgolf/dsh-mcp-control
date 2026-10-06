@@ -7,7 +7,6 @@
  * @module @mochgolf/dsh-mcp-control
  */
 
-import { isAbsolute } from 'node:path'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -15,8 +14,10 @@ import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
+import { checkCwd, isFullyQualifiedPath } from './paths.ts'
 import {
   boundedInputSchema,
+  errorResult,
   failureResult,
   okWithinBudget,
   operationDeadline,
@@ -38,10 +39,10 @@ const messageBody = z.string()
 /** Client-minted correlation identity, preserved verbatim on the accepted message. */
 const requestIdSchema = z.string().min(1).max(256)
 
-/** Working directory `session_start` accepts; the platform predicate is the one the Session header validates `cwd` with. */
+/** Working directory `session_start` accepts: fully qualified under the rule the Workspace Registry canonicalizes with. */
 const cwdSchema = z.string().min(1)
-  .refine(value => isAbsolute(value), { message: 'must be an absolute path' })
-  .describe('The MCP client\'s actual project directory. It selects DSH project context and Workspace grouping; a temporary directory does not make the Session read-only.')
+  .refine(value => isFullyQualifiedPath(value), { message: 'must be a fully qualified absolute path' })
+  .describe('The MCP client\'s actual, existing project directory. It selects DSH project context and Workspace grouping; a missing directory is refused rather than created, and a temporary directory does not make the Session read-only.')
 
 /** Whether a message queues a later turn or targets the nearest step. */
 const deliverySchema = z.enum(['queue', 'steer']).default('queue')
@@ -88,7 +89,8 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       title: 'Start a DSH session',
       description:
         'Create a root DSH session in the MCP client\'s actual project directory, or adopt the existing session with the supplied id, then submit one text prompt. '
-        + 'cwd selects project context and Workspace grouping; using a temporary directory creates an ungrouped temporary context and does not enforce read-only access. '
+        + 'cwd selects project context and Workspace grouping and must already exist as a directory; a missing or mistyped path is refused with stage "cwd" instead of being created. '
+        + 'Using a temporary directory creates an ungrouped temporary context and does not enforce read-only access. '
         + 'If the directory belongs to a registered DSH workspace, attach the session there; otherwise leave it ungrouped. '
         + 'Omit agent_preset to use the deployment\'s configured default; set it only as an intentional, known override. '
         + 'Set permission_preset to a native DSH preset such as "read-only"; it is applied before the first prompt, while cwd still names the real project. '
@@ -120,6 +122,21 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       let workspaceReceipt: { id: string; title: string } | null = null
       let agentPreset: string | null = null
       let permissionPreset: string
+      // Session creation makes a missing directory, so a mistyped or removed
+      // path would silently start an empty project; it is refused here instead.
+      try {
+        const checked = await withinDeadline(checkCwd(args.cwd), guard.signal)
+        if (!checked.ok) {
+          return errorResult(deps, checked.code, checked.message, {
+            cwd: args.cwd,
+            request_id: requestId,
+            stage: 'cwd',
+            ...(checked.reason === undefined ? {} : { reason: checked.reason }),
+          })
+        }
+      } catch (error: unknown) {
+        return failureResult(deps, error, guard.signal, { request_id: requestId, stage: 'cwd' })
+      }
       try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         const workspace = await withinDeadline(

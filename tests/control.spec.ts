@@ -5,12 +5,14 @@
  * and every refusal is produced by the real native implementation.
  */
 
-import { isAbsolute } from 'node:path'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { Client } from '@modelcontextprotocol/client'
+import { isFullyQualifiedPath } from '../src/paths.ts'
 import { textResponse } from './support/mock-adapter.ts'
 import {
   bootHarness,
@@ -104,11 +106,13 @@ describe('session_start', () => {
       prompt: 'leave this session ungrouped',
       session_id: 'root-ungrouped',
     })
+    const unresolved = join(harness.workspace, 'unresolved')
+    mkdirSync(unresolved)
     vi.spyOn(harness.ctx.workspaceRegistry, 'resolveByPath').mockRejectedValueOnce(
-      Object.assign(new Error('path disappeared'), { code: 'ENOENT' }),
+      Object.assign(new Error('registry lookup failed'), { code: 'EACCES' }),
     )
     await call(client, 'session_start', {
-      cwd: `${harness.workspace}/missing`,
+      cwd: unresolved,
       prompt: 'retain cwd creation',
       session_id: 'root-unresolved',
     })
@@ -117,7 +121,7 @@ describe('session_start', () => {
     expect(create.mock.calls[0]?.[0]).not.toHaveProperty('cwd')
     expect(create.mock.calls[1]?.[0]).toMatchObject({ cwd: harness.persistenceRoot, sessionId: 'root-ungrouped' })
     expect(create.mock.calls[1]?.[0]).not.toHaveProperty('workspaceId')
-    expect(create.mock.calls[2]?.[0]).toMatchObject({ cwd: `${harness.workspace}/missing`, sessionId: 'root-unresolved' })
+    expect(create.mock.calls[2]?.[0]).toMatchObject({ cwd: unresolved, sessionId: 'root-unresolved' })
     expect(workspace.sessionIds).toEqual([SessionId('root-grouped')])
     expect(grouped).toMatchObject({
       cwd: harness.workspace,
@@ -196,24 +200,57 @@ describe('session_start', () => {
     expect(messages).toHaveLength(1)
   })
 
-  it('accepts exactly the working directories the platform calls absolute', { timeout: 30_000 }, async () => {
-    const replies = [textResponse('probe'), textResponse('probe'), textResponse('probe'), textResponse('probe')]
-    const harness = await boot({ script: replies })
-    const client = await clientFor(harness)
-    // The Session header validates `cwd` with the same node:path predicate, so
-    // the tool schema must agree with it everywhere. Only the Windows lane tells
-    // the Windows spellings apart from a POSIX prefix test.
-    const candidates = [harness.workspace, '/repo', 'C:\\repo', '\\\\server\\share\\repo', 'relative/repo', './repo']
-    for (const [index, cwd] of candidates.entries()) {
-      const result = await client.callTool({
-        name: 'session_start',
-        arguments: { cwd, prompt: 'path probe', session_id: `root-path-${String(index)}` },
-      })
-      expect(inputRefused(result), `cwd ${JSON.stringify(cwd)}`).toBe(!isAbsolute(cwd))
+  it('accepts only fully qualified working directories under the Workspace Registry rule', () => {
+    // Both platform rules are pinned here, so the Windows refusals are proved on every host.
+    for (const path of ['/repo', '/']) expect(isFullyQualifiedPath(path, 'linux'), path).toBe(true)
+    for (const path of ['relative/repo', './repo', 'C:\\repo']) expect(isFullyQualifiedPath(path, 'linux'), path).toBe(false)
+    for (const path of ['C:\\repo', 'C:/repo', 'C:\\', '\\\\server\\share\\repo', '\\\\?\\C:\\repo']) {
+      expect(isFullyQualifiedPath(path, 'win32'), path).toBe(true)
     }
-    // The usable directory reached the loop rather than being refused with the
-    // candidates above.
-    expect((await eventsOf(harness, 'root-path-0')).map(event => event.type)).toContain('user/message')
+    // Root-relative and drive-relative spellings resolve against the DSH process's current drive.
+    for (const path of ['\\repo', '/home/me/repo', '/mnt/c/repo', 'C:repo', 'relative\\repo']) {
+      expect(isFullyQualifiedPath(path, 'win32'), path).toBe(false)
+    }
+  })
+
+  it('refuses a working directory that is not fully qualified on this platform before touching DSH', { timeout: 30_000 }, async () => {
+    const harness = await boot()
+    const client = await clientFor(harness)
+    const create = vi.spyOn(harness.ctx.sessionController, 'create')
+    const refused = ['relative/repo', './repo', ...(process.platform === 'win32' ? ['\\repo', '/repo', 'C:repo'] : [])]
+    for (const cwd of refused) {
+      const result = await client.callTool({ name: 'session_start', arguments: { cwd, prompt: 'path probe' } })
+      expect(inputRefused(result), `cwd ${JSON.stringify(cwd)}`).toBe(true)
+    }
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('refuses a missing working directory instead of letting DSH create it', { timeout: 30_000 }, async () => {
+    const harness = await boot()
+    const client = await clientFor(harness)
+    const create = vi.spyOn(harness.ctx.sessionController, 'create')
+    const missing = `${harness.workspace}-typo`
+    const stale = join(harness.workspace, 'removed-worktree', 'repo')
+    for (const cwd of [missing, stale]) {
+      const failure = await callFailure(client, 'session_start', { cwd, prompt: 'edit the repo', request_id: 'missing-cwd' })
+      expect(failure, cwd).toMatchObject({
+        code: 'mcp-control/cwd-not-found',
+        details: { cwd, request_id: 'missing-cwd', stage: 'cwd' },
+      })
+      expect(existsSync(cwd), cwd).toBe(false)
+    }
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('refuses a working directory that is a file', { timeout: 30_000 }, async () => {
+    const harness = await boot()
+    const client = await clientFor(harness)
+    const file = join(harness.workspace, 'notes.txt')
+    writeFileSync(file, 'not a directory')
+    const failure = await callFailure(client, 'session_start', { cwd: file, prompt: 'x' })
+    expect(failure).toMatchObject({ code: 'mcp-control/cwd-not-directory', details: { cwd: file, stage: 'cwd' } })
+    const below = await callFailure(client, 'session_start', { cwd: join(file, 'below'), prompt: 'x' })
+    expect(below.code).toBe('mcp-control/cwd-not-found')
   })
 
   it('names the Session identity when the create outlives its deadline', { timeout: 30_000 }, async () => {
@@ -261,8 +298,9 @@ describe('session_start', () => {
     })
     expect(adopted.session_id).toBe(first.session_id)
     await harness.ctx.agents.get(SessionId('root-adopt'))!.whenIdle()
+    mkdirSync(join(harness.workspace, 'nested'))
     const conflict = await callFailure(client, 'session_start', {
-      cwd: `${harness.workspace}/nested`,
+      cwd: join(harness.workspace, 'nested'),
       prompt: 'third',
       session_id: 'root-adopt',
     })
