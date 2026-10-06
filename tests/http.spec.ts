@@ -411,14 +411,16 @@ describe('mcp-control request guards', () => {
 
   it('completes unload while a client has stopped reading a large response', { timeout: 60_000 }, async () => {
     // A response far larger than the socket buffers comes from a real durable
-    // log, so the SDK's response write genuinely blocks on backpressure.
+    // log, so the SDK's response write genuinely blocks on backpressure. It is
+    // sized past what Windows absorbs on loopback: a few megabytes there are
+    // handed to the OS whole and the write drains with the client paused.
     const harness = await boot({
       mountControl: false,
       script: ['hang', textResponse('finished after unload')],
       config: { maxToolResultBytes: 64 * 1024 * 1024, requestTimeoutMs: 60_000 },
     })
     await seedSession(harness, 'backpressure', (session) => {
-      for (let index = 0; index < 40; index += 1) {
+      for (let index = 0; index < 320; index += 1) {
         session.append('user/message', createUserMessage({
           content: [{ type: 'text', text: `${String(index)}:${'x'.repeat(65_536)}` }],
           source: { kind: 'user' },
@@ -449,6 +451,7 @@ describe('mcp-control request guards', () => {
     // Barrier: the server's own write returned false, so the SDK adapter is
     // waiting for a drain the paused client will never produce.
     const backpressured = Promise.withResolvers<null>()
+    let blocked: ServerResponse | undefined
     const originalWrite = responseWrite()
     // `write` is overloaded in Node's declarations, so the patch is typed by
     // the implementation it wraps rather than by the public overload set.
@@ -458,7 +461,10 @@ describe('mcp-control request guards', () => {
       ...rest: unknown[]
     ): boolean {
       const accepted = originalWrite.call(this, chunk, ...rest)
-      if (!accepted) backpressured.resolve(null)
+      if (!accepted) {
+        blocked ??= this
+        backpressured.resolve(null)
+      }
       return accepted
     } as typeof ServerResponse.prototype.write
     const request = httpRequest({
@@ -495,6 +501,12 @@ describe('mcp-control request guards', () => {
       // be delivered. Waiting for them proves the client stopped reading with
       // the response genuinely in flight.
       await vi.waitFor(() => { expect(headersArrived).toBe(true) }, { timeout: 5_000, interval: 20 })
+      // A write above Node's high-water mark is not yet a stall: the premise is
+      // a response still waiting, well afterwards, for a drain that only the
+      // paused client could produce.
+      await new Promise(resolve => setTimeout(resolve, 500))
+      expect(blocked?.writableNeedDrain, 'the response write is still waiting for a drain').toBe(true)
+      expect(blocked?.writableFinished, 'the response is still unfinished').toBe(false)
 
       await fiber.dispose()
 
