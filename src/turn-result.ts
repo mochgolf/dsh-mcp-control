@@ -71,7 +71,7 @@ interface Diagnostic {
   readonly error: { readonly name: string; readonly code: string; readonly reason?: string }
 }
 
-/** One evaluation of the target prompt against the log and the live inbox. */
+/** One evaluation of the target prompt against the log and the durable inbox. */
 interface Evaluation {
   readonly value: Record<string, unknown>
   readonly state: TurnState
@@ -87,16 +87,46 @@ function locate(events: readonly SessionWireEvent[], requestId: string): { messa
   return { message, start }
 }
 
+/** What became of a prompt the log never recorded entering a turn. */
+type InboxFate =
+  | { readonly kind: 'never' }
+  | { readonly kind: 'pending' }
+  | { readonly kind: 'claimed'; readonly seq: number }
+  | { readonly kind: 'canceled' }
+
+/** One durable inbox mutation as the Agent Loop records it. */
+interface InboxSplice {
+  readonly target: 'next-turn' | 'next-step'
+  readonly start: number
+  readonly removedCount?: number
+  readonly inserted: readonly { readonly id?: unknown; readonly source?: unknown }[]
+  readonly outcome?: string
+}
+
 /**
- * Whether the log records the prompt entering the inbox. A prompt that entered
- * it, was never claimed by a turn, and no longer waits there was discarded
- * before it ran — by `clear_queue`, a cancel that clears the inbox, or the
- * Agent's shutdown, which durably cancels whatever is still pending.
+ * Replay the durable inbox splices to learn what became of the prompt. The
+ * loop claims a prompt with a removal that carries no outcome and records its
+ * `user/message` only after the step is prepared, while a removal that drops
+ * a prompt unrun — `clear_queue`, a clearing cancel, an Agent shutdown — is
+ * marked `outcome: "canceled"`; telling them apart keeps a prompt that is about
+ * to run from being reported as discarded.
+ * @param events - the complete log, from seq 0.
+ * @param requestId - the prompt's client correlation id.
+ * @returns the prompt's fate in the inbox.
  */
-function enteredInbox(events: readonly SessionWireEvent[], requestId: string): boolean {
-  return events.some(event => event.type === 'agent/inbox/spliced'
-    && ((event.data as { inserted?: unknown }).inserted as readonly { source?: unknown }[] | undefined)
-      ?.some(message => rpcIdOf(message.source) === requestId) === true)
+function inboxFate(events: readonly SessionWireEvent[], requestId: string): InboxFate {
+  const lists: Record<InboxSplice['target'], Array<{ id?: unknown; source?: unknown }>> = { 'next-turn': [], 'next-step': [] }
+  let fate: InboxFate = { kind: 'never' }
+  for (const event of events) {
+    if (event.type !== 'agent/inbox/spliced') continue
+    const splice = event.data as unknown as InboxSplice
+    const removed = lists[splice.target].splice(splice.start, splice.removedCount ?? 0, ...splice.inserted)
+    if (removed.some(message => rpcIdOf(message.source) === requestId)) {
+      fate = splice.outcome === undefined ? { kind: 'claimed', seq: event.seq } : { kind: 'canceled' }
+    }
+    if (splice.inserted.some(message => rpcIdOf(message.source) === requestId)) fate = { kind: 'pending' }
+  }
+  return fate
 }
 
 /** Whether a suffix holds the target prompt and the start of the turn it entered. */
@@ -172,8 +202,34 @@ async function evaluate(deps: ControlDeps, address: Address, requestId: string, 
   const events = await readTail(deps, native, snapshot.cursor, signal, holdsTarget(requestId))
   const found = locate(events, requestId)
   if (found === undefined) {
-    // Without the target the tail read reached the log start, so this sees every insertion.
-    const state: TurnState = enteredInbox(events, requestId) ? 'discarded' : 'not_found'
+    // Without the target the tail read reached the log start, so the replay sees every splice.
+    const fate = inboxFate(events, requestId)
+    if (fate.kind === 'claimed') {
+      // Claimed for a turn whose user/message is not recorded yet: the loop
+      // opens the turn before it claims, so the latest turn/start names it.
+      const start = events.findLastIndex(event => event.type === 'turn/start' && event.seq < fate.seq)
+      /* v8 ignore next 3 -- the loop always opens a turn before it claims queued input. */
+      if (start === -1) {
+        return { state: 'running', agentStatus, value: { ...base, state: 'running', diagnostics: [] } }
+      }
+      const turn = ((events[start] as SessionWireEvent).data as { turn: number }).turn
+      const facts = turnFacts(events, start, turn)
+      // A turn closed before it recorded the prompt — interrupted by a crash,
+      // say — ran nothing for it.
+      const state: TurnState = facts.open ? 'running' : 'ended'
+      return {
+        state,
+        agentStatus,
+        value: {
+          ...base,
+          state,
+          turn,
+          ...(facts.open ? {} : { reason: facts.reason, final_message: null }),
+          diagnostics: [],
+        },
+      }
+    }
+    const state: TurnState = fate.kind === 'canceled' ? 'discarded' : fate.kind === 'pending' ? 'queued' : 'not_found'
     return { state, agentStatus, value: { ...base, state, diagnostics: [] } }
   }
   /* v8 ignore next 4 -- the loop always opens a turn before it records the prompt entering it. */

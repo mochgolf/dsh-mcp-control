@@ -381,6 +381,7 @@ function registerSessionCancel(server: McpServer, deps: ControlDeps): void {
         'Ask the live Agent attached to a root DSH session to interrupt its current turn. Descendant subagents are left alone. '
         + 'By default unclaimed inbox prompts stay queued, and they run as soon as any later prompt wakes the agent; '
         + 'set clear_queue to remove them first, so nothing sent before the cancel runs afterwards. '
+        + 'Both need the agent loaded: a Session whose agent is not loaded is refused with session/not-found, and prompts queued for it run when a later prompt activates it. '
         + 'The receipt means the interrupt was admitted, not that the turn has already stopped.',
       inputSchema: boundedInputSchema(deps, 'session_cancel', z.strictObject({
         session_id: opaqueId,
@@ -391,6 +392,7 @@ function registerSessionCancel(server: McpServer, deps: ControlDeps): void {
         session_id: z.string(),
         accepted: z.literal(true),
         removed_queue_items: z.array(z.object({ item_id: z.string(), request_id: z.string().nullable() })).optional(),
+        removed_queue_item_count: z.number().optional(),
       }),
     },
     async (args, context) => {
@@ -422,14 +424,14 @@ function registerSessionCancel(server: McpServer, deps: ControlDeps): void {
         return okWithinBudget(deps, {
           session_id: args.session_id,
           accepted: receipt.accepted,
-          ...(args.clear_queue ? { removed_queue_items: removed } : {}),
+          ...(args.clear_queue ? { removed_queue_items: removed, removed_queue_item_count: removed.length } : {}),
         })
       } catch (error: unknown) {
         // A removal is durable even when the interrupt then fails, so the
         // caller learns exactly which prompts are already gone.
         return failureResult(deps, error, guard.signal, {
           ...correlation,
-          ...(args.clear_queue ? { removed_queue_items: removed } : {}),
+          ...(args.clear_queue ? { removed_queue_items: removed, removed_queue_item_count: removed.length } : {}),
         })
       }
     },

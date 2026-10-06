@@ -187,6 +187,43 @@ describe('turn_result', () => {
     }
   })
 
+  it('tells a prompt claimed for a turn apart from one discarded unrun', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot({ script: ['hang'] })
+    await call(client, 'session_start', { cwd: harness.workspace, prompt: 'hold', session_id: 'window', request_id: 'R1' })
+    const session = harness.ctx.sessions.get(SessionId('window'))!
+    const append = session.append.bind(session) as (type: string, data: unknown) => void
+    const prompt = (rpcId: string) => ({ content: [{ type: 'text', text: rpcId }], source: { kind: 'user', rpcId }, role: 'user', id: `message-${rpcId}` })
+    // The loop claims a prompt with a removal that carries no outcome and records
+    // its user/message only after preparing the step; a dropped prompt is marked canceled.
+    append('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [prompt('claimed')] })
+    append('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    append('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [prompt('dropped')] })
+    append('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' })
+    expect(await turnResult(client, 'window', 'claimed', 0)).toMatchObject({ state: 'running', turn: 1 })
+    expect(await turnResult(client, 'window', 'dropped', 0)).toMatchObject({ state: 'discarded' })
+  })
+
+  it('reports a prompt claimed by a turn that crashed before recording it as ended', { timeout: 30_000 }, async () => {
+    const { harness, client } = await boot()
+    await seedSession(harness, 'crashed', (session) => {
+      const append = session.append.bind(session) as (type: string, data: unknown, options?: unknown) => void
+      append('turn/start', { turn: 1 })
+      append('user/message', createUserMessage({ content: [{ type: 'text', text: 'first' }], source: { kind: 'user', rpcId: 'R1' } as never }), { surfaceOp: 'append' })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      append('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ content: [{ type: 'text', text: 'second' }], source: { kind: 'user', rpcId: 'R2' }, role: 'user', id: 'crashed-r2' }] })
+      append('turn/start', { turn: 2 })
+      append('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    })
+    // A cold read closes the orphaned turn as interrupted.
+    expect(await turnResult(client, 'crashed', 'R2', 0)).toMatchObject({
+      state: 'ended',
+      turn: 2,
+      reason: { kind: 'interrupted' },
+      final_message: null,
+      agent_status: 'not_loaded',
+    })
+  })
+
   it('answers not_found for a request id neither the log nor the inbox holds', { timeout: 30_000 }, async () => {
     const { harness, client } = await boot({ script: [textResponse('done')] })
     await call(client, 'session_start', { cwd: harness.workspace, prompt: 'answer', session_id: 'known', request_id: 'R1' })

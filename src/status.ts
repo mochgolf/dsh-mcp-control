@@ -245,7 +245,8 @@ export function registerSessionStatus(server: McpServer, deps: ControlDeps): voi
         'Report what a root DSH session or one addressed subagent child is doing now, without activating it: agent_status ("running", "idle", or "not_loaded"), '
         + 'the latest turn and whether it is still open, the prompts waiting in the durable inbox with their request_id (also for an agent that is not loaded), and the approvals the open turn waits on. '
         + 'A non-empty pending_approvals means a human must decide in the DSH Web UI before the turn can continue. '
-        + 'A queued prompt on an idle agent does not start by itself: it runs when another prompt wakes the agent, or session_cancel with clear_queue removes it.',
+        + 'A queued prompt on an idle agent does not start by itself: it runs when another prompt wakes the agent, or session_cancel with clear_queue removes it; '
+        + 'clear_queue needs the agent loaded, so a prompt queued for an agent that is not loaded runs when a later prompt activates the Session.',
       inputSchema: boundedInputSchema(deps, 'session_status', z.strictObject({ address: addressSchema })),
       outputSchema: statusOutputSchema,
       annotations: { readOnlyHint: true },

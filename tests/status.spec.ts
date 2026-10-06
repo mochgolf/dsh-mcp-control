@@ -196,7 +196,7 @@ describe('session_cancel clear_queue', () => {
     expect(result.isError).toBe(true)
     expect(textJson(result).error).toMatchObject({
       code: 'session/not-found',
-      details: { session_id: 'half', removed_queue_items: [{ item_id: expect.any(String), request_id: 'R2' }] },
+      details: { session_id: 'half', removed_queue_items: [{ item_id: expect.any(String), request_id: 'R2' }], removed_queue_item_count: 1 },
     })
   })
 
