@@ -16,13 +16,17 @@ Session Controller 与 subagent 运行时已经拥有这类客户端所需的全
 
 一个可选插件 `@mochgolf/dsh-mcp-control`，设计为通过 patch overlay（`examples/cordis.yml`）加载进 DSH Web profile。它经 `ctx.effect(() => ctx.webServer.register(...))` 在共享的 `ctx.webServer` 上注册一条精确路由。没有 daemon、没有第二个 `createServer()`、没有私有 wire client，也没有 stdout scraping；路由跟随 Web 实例自身的 host 与 port，当该绑定不是 loopback 时加载失败。
 
-插件注入 `webServer`、`sessionController`、`subagents`、`credentials`、`workspaceRegistry`、`sessions` 与 `permissionPresets`。它不发布 `./invariant` 伴随包：它不持有任何可能被独立观察出分歧的持久化或内存投影，因此它转发的每种关系都已经在 DSH 拥有它们的地方可观察。
+插件注入 `webServer`、`agents`、`sessionController`、`subagents`、`credentials`、`workspaceRegistry`、`sessions` 与 `permissionPresets`。它不发布 `./invariant` 伴随包：它不持有任何可能被独立观察出分歧的持久化或内存投影，因此它转发的每种关系都已经在 DSH 拥有它们的地方可观察。
 
-### 七个工具，没有任务状态
+### 控制工具，没有任务状态
 
 `session_start`、`session_send`、`session_cancel`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read` 使用拥有相应效果的 Session Controller、Permission Preset 与 subagent 方法。`child_send` 使用 `ctx.subagents.prompt` 并固定 `mode: continuable`，`child_interrupt` 使用 `interruptByParent`，因此 live direct parent 要求与 parent 授权校验留在已经实施它们的服务中。`agents_list` 原样转发原生 durable 条目（含 diagnostic），且从不重编号。`session_start` 只接受完全限定的 `cwd`，规则与 Workspace Registry 规范化路径时所用的相同：Windows 盘符根路径或 UNC 路径会被接受，而 `\repo`、`/home/me/repo` 这类根相对路径——`node:path.isAbsolute` 会接受，但会按 DSH 进程当前盘符解析——会被拒绝。目录必须已存在且确为目录，并在调用 DSH 之前检查，因为会话创建会把缺失的目录建出来：没有这项检查，拼错的路径或客户端已经删除的工作树会悄悄在一个新的空文件夹里开始工作。它通过 `workspaceRegistry.resolveByPath` 查询现有的规范路径所有者，再把该工作区 id 交给 Session Controller；查询未命中或路径解析失败时仍走原来的 `cwd` 路径，而且不会创建工作区。可选的 `permission_preset` 会在创建前按部署提供的原生名称校验，并在已发布会话收到首条提示词之前应用。回执会暴露解析后的目录、工作区身份、Agent preset 与实际 permission preset，客户端可在后续调用前核对上下文。它还在调用 `create` 之前自行选定会话 id，因为超过本次调用截止时间的 create 仍可能完成：否则客户端手里没有任何办法寻址该会话——接口没有枚举能力，重试还会再建一个。调用方提供 `request_id` 而未提供 `session_id` 时，id 由该 `request_id`、规范化后的 `cwd` 与提示词派生，因为丢失回执的途径不只截止时间：服务端无从得知无状态客户端已经放弃，被放弃的调用仍会创建会话并提交提示词，只有命中同一 id 的重试才能避免第二个会话重复执行同一任务。提示词进入派生键，是为了让复用旧关联 id 的新任务不会落进旧会话——在那里它的提示词会被当作重复消息确认后丢弃。
 
 每个回执报告的都是原生服务报告的内容。`accepted: true` 意味着 DSH 接收了工作；它绝不意味着某个轮次已结束、队列顺序得到承诺，或某个 child 已经存在。插件从不重试、从不保存 job、从不把 session 映射为 task，也从不创建 child——模型自己的 subagent 工具负责创建，端点只观察结果。
+
+### 看清轮次为何没有结束
+
+只读日志的调用者分辨不出：轮次是仍在计算，还是被只有人类才能在 Web UI 中回答的审批阻塞，抑或提示词因为 `session_cancel` 留在收件箱里而从未开始——而这条提示词之后会在任何其他提示词唤醒 Agent 时执行。`session_status` 在不激活会话的前提下回答这个问题：它通过 Agent registry 读取已挂载 Agent 的状态与收件箱，把日志尾部向前折叠到最近的 `turn/start` 以得出该轮次的状态，并列出未结束轮次中没有对应 `approval/decided` 的 `approval/asked` 事件。收件箱在取水位线之前读取，因此在两者之间被领取的提示词会出现两次，而不会一次都不出现。它在调用之间不保存任何东西。`session_cancel` 接受 `clear_queue`，在中断之前通过控制器自身的 `updateQueue` 移除等待中的提示词，使所有权检查与提示词上传的回收仍由 DSH 负责；默认行为仍与原生 cancel 一样保留收件箱。
 
 ### 无损读取不新增工具
 
@@ -64,4 +68,4 @@ bearer token 等同于该实例可按 id 寻址的每个会话的完整控制权
 
 ## Testing
 
-包内测试让端点跑在真实 Agent Loop、Session Controller、subagent 运行时、JSONL 持久化与共享 WebServer 上，覆盖防护、凭据轮换、卸载与重载、Agent 运行中的重载、七个工具的成功与拒绝路径、游标语义、字节预算与分片重组。配置用例断言加载期的拒绝，包括 WebServer 永远匹配不到的路由路径、计时器永远无法调度的超时，以及任何请求都无法呈现的凭据；另路径谓词在每个主机上同时按 POSIX 与 Windows 两套规则断言，不存在、是文件或非完全限定的 `cwd` 都被证明会在会话创建之前被拒绝且不留下目录；一个用例证明超过截止时间的 create 仍会报告 DSH 实际收到的那个 id、且该会话确实落在该 id 下，权限用例则证明 preset 会在 prompt 接收前完成校验与应用。分片大小上界既有直接断言，也有端到端断言：不受限的 `max_bytes` 返回的正是结果预算允许的那个分片。卸载针对「响应读到一半就不再读取」的客户端做了证明：写入触发背压，卸载仍能完成，共享监听器继续服务其它路由，全程运行的 Agent 未受影响。结果预算经 HTTP 在允许的最小预算下验证，覆盖多字节与大量转义字符的关联值、被切在代理对中间的诊断，以及比整个预算还长的未知参数名。紧凑收集器会对带有多字节超大事件的真实端点运行，并且必须只返回最终答案与诊断。随包发布的 Web profile 通过官方 MCP 客户端经 HTTP 做端到端验证，并新增录制会话快照（`snapshots/web/mcp-control/`），用真实 `dsh web` profile 驱动端点：根会话、由模型原生创建的 continuable child、向 child 投递、原始工具事件、重连后的游标续读，以及独立的 `workspace.expected/` 核验，全部以无密钥回放执行。重启用例证明已提交日志仍可读、冷 parent 被拒绝、parent 经原生方式恢复后 child 重新可控；真实模型用例覆盖文件写入任务、原生创建 child 与向 child 投递。
+包内测试让端点跑在真实 Agent Loop、Session Controller、subagent 运行时、JSONL 持久化与共享 WebServer 上，覆盖防护、凭据轮换、卸载与重载、Agent 运行中的重载、每个工具的成功与拒绝路径、游标语义、字节预算与分片重组。状态用例覆盖带排队与 steer 提示词的运行中轮次、被 cancel 滞留的提示词，以及带未决审批的未结束轮次，并证明 `clear_queue` 能保证被取消的提示词永远不会执行，而默认行为会让它在下一条提示词唤醒 Agent 时执行。配置用例断言加载期的拒绝，包括 WebServer 永远匹配不到的路由路径、计时器永远无法调度的超时，以及任何请求都无法呈现的凭据；另外，路径谓词在每个主机上同时按 POSIX 与 Windows 两套规则断言，不存在、是文件或非完全限定的 `cwd` 都被证明会在会话创建之前被拒绝且不留下目录；一个用例证明超过截止时间的 create 仍会报告 DSH 实际收到的那个 id、且该会话确实落在该 id 下，权限用例则证明 preset 会在 prompt 接收前完成校验与应用。分片大小上界既有直接断言，也有端到端断言：不受限的 `max_bytes` 返回的正是结果预算允许的那个分片。卸载针对「响应读到一半就不再读取」的客户端做了证明：写入触发背压，卸载仍能完成，共享监听器继续服务其它路由，全程运行的 Agent 未受影响。结果预算经 HTTP 在允许的最小预算下验证，覆盖多字节与大量转义字符的关联值、被切在代理对中间的诊断，以及比整个预算还长的未知参数名。紧凑收集器会对带有多字节超大事件的真实端点运行，并且必须只返回最终答案与诊断。随包发布的 Web profile 通过官方 MCP 客户端经 HTTP 做端到端验证，并新增录制会话快照（`snapshots/web/mcp-control/`），用真实 `dsh web` profile 驱动端点：根会话、由模型原生创建的 continuable child、向 child 投递、原始工具事件、重连后的游标续读，以及独立的 `workspace.expected/` 核验，全部以无密钥回放执行。重启用例证明已提交日志仍可读、冷 parent 被拒绝、parent 经原生方式恢复后 child 重新可控；真实模型用例覆盖文件写入任务、原生创建 child 与向 child 投递。

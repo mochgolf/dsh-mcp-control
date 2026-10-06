@@ -1,6 +1,6 @@
 /**
  * `mcp-control` — an opt-in MCP control endpoint on the shared WebServer's
- * exact route. It exposes seven tools that start, steer, cancel, list, and read
+ * exact route. Its tools start, steer, cancel, list, inspect, and read
  * already-known DSH Sessions through the native Session Controller and subagent
  * services; it owns no task state, starts no second listener, and never
  * bypasses DSH authority. Loading fails loudly on a non-loopback WebServer
@@ -10,6 +10,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -39,6 +40,7 @@ export const name = 'mcp-control'
 /** Host services required before the endpoint can register. */
 export const inject = [
   'webServer',
+  'agents',
   'sessionController',
   'subagents',
   'credentials',

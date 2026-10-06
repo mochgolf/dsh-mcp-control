@@ -41,6 +41,18 @@ export const TEST_TOKEN_REF = 'DSH_MCP_CONTROL_TOKEN'
 /** Credential value configured unless a case rotates it. */
 export const TEST_TOKEN = 'fixture-token-value'
 
+/** Every tool the endpoint registers, sorted by name. */
+export const TOOL_NAMES = [
+  'agents_list',
+  'child_interrupt',
+  'child_send',
+  'events_read',
+  'session_cancel',
+  'session_send',
+  'session_start',
+  'session_status',
+] as const
+
 /**
  * One mcp-control configuration; omitted fields take the production defaults.
  * @param overrides - fields this case changes.

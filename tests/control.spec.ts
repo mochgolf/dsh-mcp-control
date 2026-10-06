@@ -665,13 +665,14 @@ describe('native failure and timeout mapping', () => {
 })
 
 describe('tool result and annotation contract', () => {
-  it('marks only the two read-only tools and never claims idempotence', { timeout: 30_000 }, async () => {
+  it('marks only the read-only tools and never claims idempotence', { timeout: 30_000 }, async () => {
     const harness = await boot()
     const client = await clientFor(harness)
     const tools = (await client.listTools()).tools
     const byName = new Map(tools.map(tool => [tool.name, tool]))
-    expect(byName.get('agents_list')?.annotations?.readOnlyHint).toBe(true)
-    expect(byName.get('events_read')?.annotations?.readOnlyHint).toBe(true)
+    for (const name of ['agents_list', 'events_read', 'session_status']) {
+      expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(true)
+    }
     for (const name of ['session_start', 'session_send', 'session_cancel', 'child_send', 'child_interrupt']) {
       expect(byName.get(name)?.annotations?.readOnlyHint ?? false, name).toBe(false)
       expect(byName.get(name)?.annotations?.idempotentHint ?? false, name).toBe(false)
