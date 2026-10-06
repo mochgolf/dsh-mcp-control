@@ -5,10 +5,11 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Client } from '@modelcontextprotocol/client'
 import { textResponse, toolCallResponse } from './support/mock-adapter.ts'
-import { bootHarness, closeAll, connectClient, startRootAgent, textJson, type Harness } from './harness.ts'
+import { bootHarness, closeAll, connectClient, seedSession, startRootAgent, textJson, type Harness } from './harness.ts'
 
 const harnesses: Harness[] = []
 const clients: Client[] = []
@@ -182,6 +183,29 @@ describe('turn_result', () => {
       state: 'ended',
       final_message: 'child answer',
     })
+  })
+
+  it('finds a prompt far back in a long cold log through doubling backward pages', { timeout: 60_000 }, async () => {
+    const { harness, client } = await boot()
+    const turns = 300
+    await seedSession(harness, 'long-log', (session) => {
+      for (let turn = 1; turn <= turns; turn += 1) {
+        session.append('turn/start', { turn })
+        session.append('user/message', createUserMessage({
+          content: [{ type: 'text', text: `prompt ${String(turn)}` }],
+          source: { kind: 'user', rpcId: `R${String(turn)}` } as never,
+        }), { surfaceOp: 'append' })
+        session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      }
+    })
+    const page = vi.spyOn(harness.ctx.sessionController, 'page')
+    expect(await turnResult(client, 'long-log', 'R1', 0)).toMatchObject({ state: 'ended', turn: 1, agent_status: 'not_loaded', final_message: null })
+    // 300 messages from the head: pages of 64, 128, and 256 messages reach the first turn.
+    expect(page.mock.calls.map(([request]) => request.maxMessages)).toEqual([64, 128, 256])
+    page.mockClear()
+    expect(await turnResult(client, 'long-log', `R${String(turns)}`, 0)).toMatchObject({ state: 'ended', turn: turns })
+    expect(page).toHaveBeenCalledTimes(1)
+    expect(harness.ctx.agents.get(SessionId('long-log'))).toBeUndefined()
   })
 
   it('shortens only the final message when the result would exceed the budget', { timeout: 60_000 }, async () => {

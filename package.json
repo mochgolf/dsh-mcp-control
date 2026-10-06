@@ -23,7 +23,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage --coverage.include='src/**/*.ts'",
+    "test:coverage": "vitest run --coverage",
     "lint": "oxlint --deny-warnings src tests",
     "check": "pnpm typecheck && pnpm test:coverage && pnpm lint && pnpm build && publint"
   },
