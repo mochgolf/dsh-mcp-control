@@ -6,6 +6,7 @@
  * while the same guards are also exercised end to end in `http.spec.ts`.
  */
 
+import { getEventListeners } from 'node:events'
 import type { IncomingMessage } from 'node:http'
 import { Context } from '@deepseek-ai/cordis'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
@@ -269,6 +270,17 @@ describe('result mapping', () => {
     const already = new AbortController()
     already.abort(new Error('already cancelled'))
     await expect(withinDeadline(Promise.resolve('value'), already.signal)).rejects.toThrow('already cancelled')
+  })
+
+  it('leaves no abort listener behind once a native call settles', async () => {
+    // turn_result awaits many native reads on one call's signal; each must
+    // release its listener rather than hold it until the call ends.
+    const controller = new AbortController()
+    for (let index = 0; index < 50; index += 1) {
+      await withinDeadline(Promise.resolve(index), controller.signal)
+      await expect(withinDeadline(Promise.reject(new Error('native refusal')), controller.signal)).rejects.toThrow('native refusal')
+    }
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
   })
 
   it('measures one value by its UTF-8 JSON bytes', () => {

@@ -1,8 +1,9 @@
 /**
- * The seven MCP tools. Each maps one validated JSON argument object onto one
- * existing DSH service call and reports that call's own receipt or its own
- * public failure — no tool waits for a model turn, invents a task state, or
- * retries. The set is fixed at registration, so tool names never collide.
+ * The MCP control tools. Each maps one validated JSON argument object onto the
+ * existing DSH service calls that own its effect and reports their own receipt
+ * or public failure — no tool invents a task state or retries, and only
+ * `turn_result` waits, for a bounded time, on a turn DSH is already running.
+ * The set is fixed at registration, so tool names never collide.
  *
  * @module @mochgolf/dsh-mcp-control
  */
@@ -396,9 +397,9 @@ function registerSessionCancel(server: McpServer, deps: ControlDeps): void {
       using guard = operationDeadline(deps, context)
       const correlation = { session_id: args.session_id }
       const sessionId = SessionId(args.session_id)
+      const removed: Array<{ item_id: string; request_id: string | null }> = []
       try {
         guard.signal.throwIfAborted()
-        const removed: Array<{ item_id: string; request_id: string | null }> = []
         if (args.clear_queue) {
           // Removal goes through the controller's own queue mutation, which keeps
           // its ownership checks and retires the prompt's upload bindings.
@@ -424,7 +425,12 @@ function registerSessionCancel(server: McpServer, deps: ControlDeps): void {
           ...(args.clear_queue ? { removed_queue_items: removed } : {}),
         })
       } catch (error: unknown) {
-        return failureResult(deps, error, guard.signal, correlation)
+        // A removal is durable even when the interrupt then fails, so the
+        // caller learns exactly which prompts are already gone.
+        return failureResult(deps, error, guard.signal, {
+          ...correlation,
+          ...(args.clear_queue ? { removed_queue_items: removed } : {}),
+        })
       }
     },
   )
@@ -556,7 +562,7 @@ function registerChildInterrupt(server: McpServer, deps: ControlDeps): void {
 }
 
 /**
- * Build one request-scoped MCP server carrying the fixed seven tools.
+ * Build one request-scoped MCP server carrying the fixed control tools.
  * @param deps - plugin dependencies shared by every tool.
  * @returns a fresh server for one MCP request.
  */

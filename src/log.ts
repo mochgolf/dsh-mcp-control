@@ -65,11 +65,42 @@ export function addressCorrelation(address: Address): Record<string, string> {
     : { parent_session_id: address.parent_session_id, child_session_id: address.child_session_id }
 }
 
-/** The opening observation of one durable address: header, watermark, and its trailing window. */
+/** One prompt waiting in a Session's inbox, as the durable inbox projection holds it. */
+export interface PendingPrompt {
+  readonly id: string
+  readonly delivery: 'queue' | 'steer'
+  readonly source?: unknown
+  readonly content: readonly unknown[]
+}
+
+/** The opening observation of one durable address: header, watermark, its trailing window, and its inbox. */
 export interface OpeningSnapshot {
   readonly header: SessionWireHeader
   readonly cursor: number
   readonly records: readonly SessionHistoryRecord[]
+  /**
+   * Prompts the durable inbox projection holds at the watermark — the same
+   * cut as `cursor`, and present whether or not an Agent is loaded; undefined
+   * when no inbox projection is registered.
+   */
+  readonly inbox: readonly PendingPrompt[] | undefined
+}
+
+/** The pending prompts one inbox projection value lists, steering prompts first. */
+function inboxOf(values: Readonly<Record<string, unknown>> | undefined): PendingPrompt[] | undefined {
+  const inbox = values?.inbox as { readonly 'next-turn'?: unknown; readonly 'next-step'?: unknown } | null | undefined
+  if (inbox === undefined || inbox === null) return undefined
+  const prompts = (entries: unknown, delivery: PendingPrompt['delivery']): PendingPrompt[] => {
+    /* v8 ignore next -- the inbox projection always carries both pending lists. */
+    if (!Array.isArray(entries)) return []
+    return entries.map((entry: { id?: unknown; source?: unknown; content?: unknown }) => ({
+      id: String(entry.id),
+      delivery,
+      source: entry.source,
+      content: Array.isArray(entry.content) ? entry.content : [],
+    }))
+  }
+  return [...prompts(inbox['next-step'], 'steer'), ...prompts(inbox['next-turn'], 'queue')]
 }
 
 /**
@@ -97,7 +128,12 @@ export async function openingSnapshot(
     if (frame.done === true || frame.value.type !== 'snapshot') {
       throw new Error('session follow did not open with a snapshot frame')
     }
-    return { header: frame.value.header, cursor: frame.value.cursor, records: frame.value.records }
+    return {
+      header: frame.value.header,
+      cursor: frame.value.cursor,
+      records: frame.value.records,
+      inbox: inboxOf(frame.value.projections.values),
+    }
   } finally {
     await iterator.return?.()
   }

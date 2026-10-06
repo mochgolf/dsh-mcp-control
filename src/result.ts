@@ -1,5 +1,5 @@
 /**
- * Result, failure, and deadline handling shared by all seven tools. One place
+ * Result, failure, and deadline handling shared by every tool. One place
  * decides how a native receipt becomes structured content, how a native failure
  * keeps its public code, and how the per-call deadline fuses client
  * cancellation, plugin unload, and the configured call timeout.
@@ -160,14 +160,18 @@ export function okWithinBudget(deps: ControlDeps, value: Record<string, unknown>
  */
 export async function withinDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted()
-  // The fused per-call signal carries this listener for the call's lifetime
-  // only, so the one-shot registration needs no separate removal.
+  let onAbort: (() => void) | undefined
   const aborted = new Promise<never>((_resolve, reject) => {
-    signal.addEventListener('abort', () => { reject(signal.reason as Error) }, { once: true })
+    onAbort = () => { reject(signal.reason as Error) }
+    signal.addEventListener('abort', onAbort, { once: true })
   })
   try {
     return await Promise.race([work, aborted])
   } finally {
+    // One call can await many native operations on the same signal — a
+    // turn_result wait re-reads the log on every change — so each listener is
+    // removed as soon as its race settles rather than kept for the call.
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
     // The native operation keeps running after the deadline; its settlement is
     // consumed here so an abandoned rejection never surfaces process-wide.
     void work.catch(() => {})
@@ -289,7 +293,7 @@ export function failureResult(
   deps: ControlDeps,
   error: unknown,
   signal: AbortSignal,
-  correlation: Record<string, string>,
+  correlation: Record<string, unknown>,
 ): CallToolResult {
   if (timeoutOf(signal) !== undefined) {
     return errorResult(deps, 'mcp-control/request-timeout', 'the call ended before DSH confirmed its outcome', {
