@@ -158,7 +158,13 @@ describe('turn_result', () => {
   })
 
   it('reads the result of a child_send through the subagent address', { timeout: 30_000 }, async () => {
-    const { harness, client } = await boot({ script: [textResponse('child settled'), textResponse('child answer')] })
+    const { harness, client } = await boot()
+    // The parent also runs a turn when its child settles, so replies follow the
+    // prompt rather than the order in which the two Agents call the model.
+    vi.spyOn(harness.adapter, 'stream').mockImplementation(async function* (options) {
+      const asked = JSON.stringify(options.messages.at(-1) ?? null)
+      yield* textResponse(asked.includes('continue') ? 'child answer' : 'settled')
+    })
     const parent = await startRootAgent(harness, 'root-tree')
     const started = await harness.ctx.subagents.startContinuable({
       provider: 'spawn',
@@ -181,6 +187,7 @@ describe('turn_result', () => {
       parent_session_id: parent.id,
       child_session_id: started.childId,
       state: 'ended',
+      reason: { kind: 'completed' },
       final_message: 'child answer',
     })
   })
