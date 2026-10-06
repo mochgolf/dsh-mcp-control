@@ -7,6 +7,7 @@
  * @module @mochgolf/dsh-mcp-control
  */
 
+import { createHash } from 'node:crypto'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -74,6 +75,31 @@ function mintSessionId(): SessionId {
   return SessionId(`session-${randomUUID()}`)
 }
 
+/** Version tag separating derived Session identities from any other digest of the same fields. */
+const DERIVED_SESSION_SCHEME = 'dsh-mcp-control/session-start/v1'
+
+/**
+ * Derive the Session identity that every retry of one start request reaches
+ * again. A client that lost a receipt — its own tool timeout fired, or the
+ * user interrupted the call — retries with the same arguments; deriving the
+ * identity from them makes that retry adopt the Session the first attempt
+ * created instead of starting a second one that runs the same prompt. The
+ * prompt is part of the key so that a reused correlation id carrying a new task
+ * never lands in an old Session where its prompt would be acknowledged as a
+ * duplicate and dropped.
+ * @param requestId - the client-minted correlation id.
+ * @param canonicalCwd - the working directory after `realpath`, so spellings of one directory agree.
+ * @param prompt - the prompt text exactly as received.
+ * @returns a `session-` prefixed RFC 9562 version 8 UUID.
+ */
+export function derivedSessionId(requestId: string, canonicalCwd: string, prompt: string): SessionId {
+  const digest = createHash('sha256').update(JSON.stringify([DERIVED_SESSION_SCHEME, requestId, canonicalCwd, prompt])).digest()
+  digest[6] = ((digest[6] ?? 0) & 0x0f) | 0x80
+  digest[8] = ((digest[8] ?? 0) & 0x3f) | 0x80
+  const hex = digest.subarray(0, 16).toString('hex')
+  return SessionId(`session-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`)
+}
+
 /** One text prompt part, the only content kind these tools submit. */
 function textContent(text: string): [{ type: 'text'; text: string }] {
   return [{ type: 'text', text }]
@@ -95,7 +121,8 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         + 'Omit agent_preset to use the deployment\'s configured default; set it only as an intentional, known override. '
         + 'Set permission_preset to a native DSH preset such as "read-only"; it is applied before the first prompt, while cwd still names the real project. '
         + 'Returns once DSH accepts the prompt and never waits for the turn to finish. '
-        + 'Reusing the same request_id links a retry to the message the first attempt persisted. '
+        + 'Pass a fresh request_id (a UUID) for every new start and reuse it unchanged when retrying: without session_id, the same request_id, cwd, and prompt always address the same Session, '
+        + 'so a retry after a lost or timed-out receipt adopts the Session the first attempt created and does not submit the prompt twice. '
         + 'A failure that reports stage "create" still carries the session_id it tried to create, so a retry can adopt that id instead of creating a second session. '
         + 'A stage "permission" failure identifies a created Session whose prompt was not submitted.',
       inputSchema: boundedInputSchema(deps, 'session_start', z.strictObject({
@@ -104,19 +131,16 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         agent_preset: z.string().min(1).max(256).optional()
           .describe('Explicit DSH Agent preset override. Omit it to use the deployment default.'),
         permission_preset: permissionPresetSchema.optional(),
-        session_id: opaqueId.optional(),
-        request_id: requestIdSchema.optional(),
+        session_id: opaqueId.optional()
+          .describe('Explicit Session identity to create or adopt. Omit it to derive one from request_id, cwd, and prompt.'),
+        request_id: requestIdSchema.optional()
+          .describe('Client-minted idempotency key, unique per new start and reused unchanged on retry.'),
       })),
       outputSchema: startReceiptSchema,
     },
     async (args, context) => {
       const requestId = resolveRequestId(args.request_id)
       using guard = operationDeadline(deps, context)
-      // The identity is minted here rather than inside the controller, because a
-      // create that outlives the deadline can still finish: a session nobody can
-      // name is unreachable through an interface with no enumeration, and a
-      // retry without the id would create a second one.
-      const attempted = args.session_id === undefined ? mintSessionId() : SessionId(args.session_id)
       let sessionId: SessionId
       let resolvedCwd = args.cwd
       let workspaceReceipt: { id: string; title: string } | null = null
@@ -124,6 +148,7 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
       let permissionPreset: string
       // Session creation makes a missing directory, so a mistyped or removed
       // path would silently start an empty project; it is refused here instead.
+      let canonicalCwd: string
       try {
         const checked = await withinDeadline(checkCwd(args.cwd), guard.signal)
         if (!checked.ok) {
@@ -134,9 +159,19 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
             ...(checked.reason === undefined ? {} : { reason: checked.reason }),
           })
         }
+        canonicalCwd = checked.canonical
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, { request_id: requestId, stage: 'cwd' })
       }
+      // The identity is chosen here rather than inside the controller, because a
+      // create that outlives the deadline can still finish: a session nobody can
+      // name is unreachable through an interface with no enumeration. A caller's
+      // request_id derives it, so a retry that never saw the receipt reaches it again.
+      const attempted = args.session_id !== undefined
+        ? SessionId(args.session_id)
+        : args.request_id === undefined
+          ? mintSessionId()
+          : derivedSessionId(args.request_id, canonicalCwd, args.prompt)
       try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         const workspace = await withinDeadline(

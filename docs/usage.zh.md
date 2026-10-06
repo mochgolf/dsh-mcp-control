@@ -40,6 +40,8 @@ startup_timeout_sec = 10
 tool_timeout_sec = 30
 ```
 
+让 `tool_timeout_sec` 大于端点的 `requestTimeoutMs`（默认 25 秒），这样慢调用会在客户端放弃之前得到答复——要么是结果，要么是明确的 `request-timeout`；并通过 `bearer_token_env_var` 传递 token，不要把它作为明文 `Authorization` 头写进客户端配置文件。
+
 客户端会列出七个工具：`session_start`、`session_send`、`session_cancel`、`agents_list`、`child_send`、`child_interrupt` 与 `events_read`。它们的输入、结果、错误码以及 `events_read` 的分页／分片形式由[包 README](../README.zh.md)说明。
 
 `accepted: true` 意味着 DSH 接收了工作，而不是某个轮次已经结束。`child_send` 要求该 child 的直接 parent 处于 live 状态；端点会拒绝冷 parent，而不是恢复它。
