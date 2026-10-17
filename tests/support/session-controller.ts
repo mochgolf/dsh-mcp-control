@@ -28,10 +28,10 @@ const TEST_IMAGE_LIMITS: ImageAttachmentLimits = Object.freeze({
 })
 
 /** Build or return the production Session Controller used by the endpoint tests. */
-export function createSessionTestController(
+export async function createSessionTestController(
   ctx: Context,
   defaults: TestSessionControllerDefaults,
-): SessionController {
+): Promise<SessionController> {
   const found = installed.get(ctx)
   if (found !== undefined) return found
 
@@ -40,6 +40,7 @@ export function createSessionTestController(
     ctx.provide('typert', {
       lookups: { configure: () => dispose },
       contexts: { configureHost: () => dispose },
+      resources: { register: () => dispose },
     } as never)
   }
   if (ctx.get('agentDefaultModel') === undefined) {
@@ -81,11 +82,13 @@ export function createSessionTestController(
   }
   if (ctx.get('sessionProjections') === undefined) new SessionProjectionRegistry(ctx)
   if (ctx.get('sessionQuery') === undefined) new TestSessionQuery(ctx)
+  if (ctx.get('remoteAccess') === undefined) ctx.provide('remoteAccess', {} as never)
 
   const cwd = vi.spyOn(process, 'cwd').mockReturnValue(defaults.cwd)
   let controller: SessionController
   try {
-    controller = new SessionController(ctx, {})
+    await ctx.plugin(SessionController, {}).await()
+    controller = ctx.sessionController
   } finally {
     cwd.mockRestore()
   }

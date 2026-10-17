@@ -257,7 +257,8 @@ describe('turn_result', () => {
       yield* textResponse(asked.includes('continue') ? 'child answer' : 'settled')
     })
     const parent = await startRootAgent(harness, 'root-tree')
-    const started = await harness.ctx.subagents.startContinuable({
+    const started = await harness.ctx.subagents.startActivation({
+      delivery: 'caller',
       provider: 'spawn',
       label: 'worker',
       request: { prompt: [{ type: 'text', text: 'child task' }], parent },

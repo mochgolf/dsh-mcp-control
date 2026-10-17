@@ -20,7 +20,7 @@ import WebServer from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-permission-presets'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentRuntime from '@deepseek-ai/dsh-subagent'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -124,14 +124,14 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
     if (ownedPersistence) rmSync(persistenceRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   }
   try {
-    await mountAgentLoopTestDependencies(ctx)
+    await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
     if (options.persistence !== false) {
-      await ctx.plugin(JsonlSessionPersistence, { root: persistenceRoot })
+      await ctx.plugin(JsonlSessionPersistence, { root: persistenceRoot }).await()
     }
-    await ctx.plugin(AgentLoop, { agents: [] })
-    await ctx.plugin(TestSessionQuery)
-    await ctx.plugin(SubagentRuntime)
-    await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
+    await ctx.plugin(AgentLoop, { agents: [] }).await()
+    await ctx.plugin(TestSessionQuery).await()
+    await ctx.plugin(SubagentRuntime).await()
+    await ctx.plugin(SubagentSpawn, { providerName: 'spawn' }).await()
     const adapter = new MockAdapter(options.script ?? [])
     ctx.llm.registerAdapter(['mock'], adapter)
 
@@ -211,16 +211,17 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
     } as never)
 
     // The Service constructor registers `sessionController` on this context.
-    createSessionTestController(ctx, {
+    await createSessionTestController(ctx, {
       defaultModelSelection: (): ModelSelection => ({ provider: 'mock', model: 'mock' }),
       cwd: workspace,
     })
 
-    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
+    await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }).await()
     if (options.mountControl !== false) {
-      await ctx.plugin(McpControl, controlConfig({ path: '/mcp', ...options.config }))
+      await ctx.plugin(McpControl, controlConfig({ path: '/mcp', ...options.config })).await()
     }
     const port = ctx.webServer.port
+    if (port === undefined) throw new Error('test WebServer did not bind a port')
     const retainRoots = options.retainRoots === true
     let disposed = false
     return {

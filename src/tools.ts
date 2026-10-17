@@ -11,9 +11,10 @@
 import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
+import { ApiSessionNotFound } from '@deepseek-ai/dsh-api-session-controller'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
-import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError, remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
@@ -21,6 +22,7 @@ import { registerEventsRead } from './events.ts'
 import { checkCwd, gitLayoutOf, isFullyQualifiedPath, isWithin, type GitLayout, type WorktreeFacts } from './paths.ts'
 import { registerSessionStatus, rpcIdOf } from './status.ts'
 import { registerTurnResult } from './turn-result.ts'
+import { acquireStartSlot } from './start-slot.ts'
 import {
   boundedInputSchema,
   errorResult,
@@ -170,7 +172,10 @@ function textContent(text: string): [{ type: 'text'; text: string }] {
 }
 
 /** Register `session_start`: create or adopt a root session, then submit one prompt. */
+const startSlotsByContext = new WeakMap<ControlDeps['ctx'], Map<string, Promise<void>>>()
 function registerSessionStart(server: McpServer, deps: ControlDeps): void {
+  const startSlots = startSlotsByContext.get(deps.ctx) ?? new Map<string, Promise<void>>()
+  startSlotsByContext.set(deps.ctx, startSlots)
   const permissionPresetSchema = z.enum(deps.ctx.permissionPresets.names)
     .describe(`Native DSH permission preset applied before the first prompt. Available: ${deps.ctx.permissionPresets.names.join(', ')}.`)
   server.registerTool(
@@ -250,6 +255,7 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
           ? mintSessionId()
           : derivedSessionId(args.request_id, canonicalCwd, args.prompt)
       try {
+        using slot = await acquireStartSlot(startSlots, attempted, guard.signal)
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         let workspace = await withinDeadline(
           deps.ctx.workspaceRegistry.resolveByPath(args.cwd).catch(() => undefined),
@@ -276,11 +282,34 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
             })
           }
         }
-        const created = await withinDeadline(deps.ctx.sessionController.create({
-          ...(workspace === undefined ? { cwd: args.cwd } : { workspaceId: workspace.id }),
-          sessionId: attempted,
-          ...(args.agent_preset === undefined ? {} : { agentPreset: args.agent_preset }),
-        }), guard.signal)
+        // DSH 0.2.1 create() reuses only blank conversations. An MCP retry
+        // must instead resume its durable identity once a turn has started.
+        let existing: Awaited<ReturnType<typeof deps.ctx.sessionController.inspect>> | undefined
+        try { existing = await withinDeadline(deps.ctx.sessionController.inspect(attempted, guard.signal), guard.signal) }
+        catch (error: unknown) { if (!(error instanceof ApiSessionNotFound) && remoteErrorOf(error)?.code !== 'session/not-found') throw error }
+        let created: { sessionId: SessionId; agentPreset?: string }
+        if (existing !== undefined) {
+          const cwd = existing.meta.cwd === undefined ? undefined : await withinDeadline(checkCwd(existing.meta.cwd), guard.signal)
+          if (cwd?.ok !== true || cwd.canonical !== canonicalCwd) {
+            throw new RemoteError('session/conflict', 'the named Session owns a different working directory', { sessionId: attempted, requestedCwd: args.cwd, ...(existing.meta.cwd === undefined ? {} : { existingCwd: existing.meta.cwd }) })
+          }
+          const records: readonly { type: string; data: unknown }[] = existing.events
+          const selected = [...records].reverse().find(event => event.type === 'agent-preset/selected')?.data
+          const preset = selected !== null && typeof selected === 'object' && 'agentPreset' in selected && typeof selected.agentPreset === 'string' ? selected.agentPreset : existing.meta.agentPreset
+          if (args.agent_preset !== undefined && args.agent_preset !== preset) {
+            throw new RemoteError('gateway/bad-request', 'the named Session already has another Agent preset', {})
+          }
+          const resolved = await withinDeadline(deps.ctx.sessionController.resolveAgent(attempted), guard.signal)
+          if ('error' in resolved) throw resolved.error
+          if (workspace !== undefined) await withinDeadline(workspace.attachSession(attempted), guard.signal)
+          created = { sessionId: attempted, ...(preset === undefined ? {} : { agentPreset: preset }) }
+        } else {
+          created = await withinDeadline(slot.track(deps.ctx.sessionController.create({
+            ...(workspace === undefined ? { cwd: args.cwd } : { workspaceId: workspace.id }),
+            sessionId: attempted,
+            ...(args.agent_preset === undefined ? {} : { agentPreset: args.agent_preset }),
+          })), guard.signal)
+        }
         sessionId = created.sessionId
         resolvedCwd = workspace?.path ?? args.cwd
         workspaceReceipt = workspace === undefined ? null : { id: workspace.id, title: workspace.title }

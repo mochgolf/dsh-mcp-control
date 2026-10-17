@@ -339,7 +339,7 @@ describe('mcp-control request guards', () => {
       path: '/mcp',
       handler: (_request, response) => { response.writeHead(204); response.end() },
     })
-    await expect(harness.ctx.plugin(McpControl, controlConfig()))
+    await expect(harness.ctx.plugin(McpControl, controlConfig()).await())
       .rejects.toThrow(/duplicate exact route/u)
   })
 
@@ -349,7 +349,7 @@ describe('mcp-control request guards', () => {
     await new Promise<void>(resolve => other.listen(0, '127.0.0.1', resolve))
     const otherPort = (other.address() as AddressInfo).port
     try {
-      const fiber = await harness.ctx.plugin(McpControl, controlConfig())
+      const fiber = await harness.ctx.plugin(McpControl, controlConfig()).await()
       const client = await connectClient(`${harness.baseUrl}/mcp`)
       expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length)
       await fiber.dispose()
@@ -371,7 +371,7 @@ describe('mcp-control request guards', () => {
 
   it('terminates a request still being received when the endpoint unloads', { timeout: 30_000 }, async () => {
     const harness = await boot({ mountControl: false })
-    const fiber = await harness.ctx.plugin(McpControl, controlConfig())
+    const fiber = await harness.ctx.plugin(McpControl, controlConfig()).await()
     // Hold admission open so the case knows the route handler owns this request
     // before the unload, instead of racing the socket.
     const admitted = Promise.withResolvers<null>()
@@ -435,7 +435,7 @@ describe('mcp-control request guards', () => {
     const fiber = await harness.ctx.plugin(McpControl, controlConfig({
       maxToolResultBytes: 64 * 1024 * 1024,
       requestTimeoutMs: 60_000,
-    }))
+    })).await()
     const agent = await startRootAgent(harness, 'backpressure-live')
     const driver = await connectClient(`${harness.baseUrl}/mcp`)
     clients.push(driver)
@@ -534,7 +534,7 @@ describe('mcp-control request guards', () => {
       // The Agent running throughout was never the endpoint's to stop, and a
       // reloaded endpoint still controls it.
       expect(harness.ctx.agents.get(SessionId('backpressure-live'))?.status).toBe('running')
-      const secondMount = await harness.ctx.plugin(McpControl, controlConfig())
+      const secondMount = await harness.ctx.plugin(McpControl, controlConfig()).await()
       const second = await connectClient(`${harness.baseUrl}/mcp`)
       clients.push(second)
       const cancelled = await second.callTool({ name: 'session_cancel', arguments: { session_id: 'backpressure-live' } })
@@ -552,7 +552,7 @@ describe('mcp-control request guards', () => {
   it('reloads the endpoint while a root Agent is running without stopping it', { timeout: 30_000 }, async () => {
     const harness = await boot({ mountControl: false, script: ['hang', textResponse('finished after reload')] })
     const url = `${harness.baseUrl}/mcp`
-    const firstMount = await harness.ctx.plugin(McpControl, controlConfig())
+    const firstMount = await harness.ctx.plugin(McpControl, controlConfig()).await()
     const first = await connectClient(url)
     const started = await first.callTool({
       name: 'session_start',
@@ -572,7 +572,7 @@ describe('mcp-control request guards', () => {
     // not the plugin's to stop.
     expect(harness.ctx.agents.get(SessionId('reload-live'))?.status).toBe('running')
 
-    const secondMount = await harness.ctx.plugin(McpControl, controlConfig())
+    const secondMount = await harness.ctx.plugin(McpControl, controlConfig()).await()
     const second = await connectClient(url)
     clients.push(second)
     // The reloaded endpoint reads the same durable log forward from the cursor
@@ -591,7 +591,7 @@ describe('mcp-control request guards', () => {
 
   it('reloads the endpoint and keeps a started session readable by id', { timeout: 30_000 }, async () => {    const harness = await boot({ mountControl: false })
     const url = `${harness.baseUrl}/mcp`
-    const firstMount = await harness.ctx.plugin(McpControl, controlConfig())
+    const firstMount = await harness.ctx.plugin(McpControl, controlConfig()).await()
     const first = await connectClient(url)
     const started = await first.callTool({
       name: 'session_start',
@@ -601,7 +601,7 @@ describe('mcp-control request guards', () => {
     await first.close()
     await firstMount.dispose()
 
-    const secondMount = await harness.ctx.plugin(McpControl, controlConfig())
+    const secondMount = await harness.ctx.plugin(McpControl, controlConfig()).await()
     const second = await connectClient(url)
     clients.push(second)
     const page = await second.callTool({
