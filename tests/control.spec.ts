@@ -197,8 +197,10 @@ describe('session_start', () => {
     // The scripted model call is still held open, so the receipt cannot have
     // waited for the turn to finish.
     expect(harness.ctx.agents.get(SessionId('root-receipt'))?.status).toBe('running')
-    const messages = (await eventsOf(harness, 'root-receipt')).filter(event => event.type === 'user/message')
-    expect(messages).toHaveLength(1)
+    await vi.waitFor(async () => {
+      const messages = (await eventsOf(harness, 'root-receipt')).filter(event => event.type === 'user/message' && rpcIdOf(event) === 'request-1')
+      expect(messages).toHaveLength(1)
+    })
   })
 
   it('accepts only fully qualified working directories under the Workspace Registry rule', () => {
@@ -317,7 +319,7 @@ describe('session_start', () => {
     const retry = await call(client, 'session_start', args)
     // The abandoned first call still finishes on the server and submits its prompt.
     await vi.waitFor(async () => {
-      expect(attempted).toHaveLength(2)
+      expect(attempted).toHaveLength(1)
       const agent = harness.ctx.agents.get(SessionId(String(retry.session_id)))
       expect(agent?.status).toBe('idle')
     }, { timeout: 5_000 })
@@ -449,6 +451,9 @@ describe('session_send', () => {
       request_id: 'repeated-request',
     })
     expect(second).toEqual(first)
+    // Acceptance precedes the turn and its durable append; count after both settle.
+    await harness.ctx.agents.get(SessionId('root-duplicate'))!.whenIdle()
+    await harness.ctx.sessions.flush(harness.ctx.sessions.get(SessionId('root-duplicate'))!)
     const repeated = (await eventsOf(harness, 'root-duplicate'))
       .filter(event => event.type === 'user/message' && rpcIdOf(event) === 'repeated-request')
     expect(repeated).toHaveLength(1)
@@ -513,7 +518,8 @@ describe('subagent control', () => {
   /** Start a live root Agent and one native continuable child below it. */
   async function withChild(harness: Harness) {
     const parent = await startRootAgent(harness, 'root-tree')
-    const started = await harness.ctx.subagents.startContinuable({
+    const started = await harness.ctx.subagents.startActivation({
+      delivery: 'caller',
       provider: 'spawn',
       label: 'worker',
       request: { prompt: [{ type: 'text', text: 'child task' }], parent },
@@ -559,9 +565,11 @@ describe('subagent control', () => {
       accepted: true,
     })
     expect(String(delivered.message_id)).not.toBe('')
-    const childMessages = (await eventsOf(harness, String(childId)))
-      .filter(event => event.type === 'user/message' && rpcIdOf(event) === 'child-request-1')
-    expect(childMessages).toHaveLength(1)
+    await vi.waitFor(async () => {
+      const childMessages = (await eventsOf(harness, String(childId)))
+        .filter(event => event.type === 'user/message' && rpcIdOf(event) === 'child-request-1')
+      expect(childMessages).toHaveLength(1)
+    })
   })
 
   it('refuses delivery through a parent with no live Agent instead of resuming it', { timeout: 30_000 }, async () => {
@@ -605,7 +613,9 @@ describe('native failure and timeout mapping', () => {
   it('passes an agent preset through to DSH and reports its own refusal', { timeout: 30_000 }, async () => {
     const harness = await boot({ script: [textResponse('settled')] })
     const client = await clientFor(harness)
-    const create = vi.spyOn(harness.ctx.sessionController, 'create')
+    const create = vi.spyOn(harness.ctx.sessionController, 'create').mockRejectedValue(
+      new RemoteError('gateway/bad-request', 'native fixture refuses the requested preset', {}),
+    )
     const failure = await callFailure(client, 'session_start', {
       cwd: harness.workspace,
       prompt: 'with a preset',

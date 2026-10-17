@@ -179,6 +179,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const handler = createMcpHandler(() => createControlServer(deps), { legacy: 'stateless', onerror: report })
   const nodeHandler = toNodeHandler(handler, { onerror: report })
   const port = ctx.webServer.port
+  if (port === undefined) throw new Error('mcp-control requires a listening WebServer')
   const serve = createRequestHandler(deps, tokenRef, port, async (request, response, body) => {
     await nodeHandler(replayableRequest(request, body), response)
   })

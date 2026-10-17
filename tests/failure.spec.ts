@@ -70,7 +70,7 @@ async function callFailure(
 describe('plugin reload with a live root', () => {
   it('leaves the running Agent, its session, and its cursor untouched', { timeout: 60_000 }, async () => {
     const harness = await boot({ script: ['hang', textResponse('after the reload')], mountControl: false })
-    const mounted = await harness.ctx.plugin(McpControl, controlConfig())
+    const mounted = await harness.ctx.plugin(McpControl, controlConfig()).await()
     const first = await clientFor(harness)
     const started = await call(first, 'session_start', {
       cwd: harness.workspace,
@@ -90,7 +90,7 @@ describe('plugin reload with a live root', () => {
 
     // Unload and re-register the endpoint while the model call is still open.
     await mounted.dispose()
-    await harness.ctx.plugin(McpControl, controlConfig())
+    await harness.ctx.plugin(McpControl, controlConfig()).await()
 
     expect(harness.ctx.agents.get(SessionId('reload-root'))).toBe(agent)
     expect(agent?.status).toBe('running')
@@ -173,7 +173,8 @@ describe('cold durable tree and parent recovery', () => {
     const first = await boot({ script: [textResponse('root settled'), textResponse('child settled')], retainRoots: true })
     const firstClient = await clientFor(first)
     const parent = await startRootAgent(first, 'restart-root')
-    const started = await first.ctx.subagents.startContinuable({
+    const started = await first.ctx.subagents.startActivation({
+      delivery: 'caller',
       provider: 'spawn',
       label: 'worker',
       request: { prompt: [{ type: 'text', text: 'child task' }], parent },
