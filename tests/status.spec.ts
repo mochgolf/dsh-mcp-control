@@ -203,6 +203,9 @@ describe('session_cancel clear_queue', () => {
   it('keeps the inbox by default, and the stranded prompt runs when a later prompt wakes the agent', { timeout: 30_000 }, async () => {
     const { harness, client } = await boot({ script: ['hang', textResponse('stranded turn'), textResponse('new turn')] })
     await call(client, 'session_start', { cwd: harness.workspace, prompt: 'hold', session_id: 'kept', request_id: 'R1' })
+    // Acceptance can precede execution. Cancel only after the scripted hanging
+    // turn actually started, so it cannot migrate to the queued prompt.
+    await vi.waitFor(() => { expect(harness.adapter.requests).toHaveLength(1) })
     await call(client, 'session_send', { session_id: 'kept', message: 'cancelled intent', request_id: 'R2' })
     expect(await call(client, 'session_cancel', { session_id: 'kept' })).toEqual({ session_id: 'kept', accepted: true })
     const agent = harness.ctx.agents.get(SessionId('kept'))!

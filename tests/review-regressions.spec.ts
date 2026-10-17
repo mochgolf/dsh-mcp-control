@@ -61,14 +61,24 @@ describe('configured request size reaches both SDK adapters', () => {
         protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x'.repeat(size), version: '1' },
       } })
       return await new Promise<{ status: number; text: string }>((resolve, reject) => {
-        const req = request({ host: '127.0.0.1', port: h.port, path: '/mcp', method: 'POST', headers: {
+        let answer: { status: number; text: string } | undefined
+        let uploaded = false
+        const complete = () => { if (uploaded && answer !== undefined) resolve(answer) }
+        // Own this exchange's socket. An early 413 may arrive while Node is
+        // still writing the body; don't dispose the server in that interval.
+        const req = request({ host: '127.0.0.1', port: h.port, path: '/mcp', method: 'POST', agent: false, headers: {
           authorization: `Bearer ${TEST_TOKEN}`, 'content-type': 'application/json',
           accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(body),
         } }, res => {
           const parts: Buffer[] = []
           res.on('data', (chunk: Buffer) => parts.push(chunk))
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(parts).toString() }))
+          res.on('error', reject)
+          res.on('end', () => {
+            answer = { status: res.statusCode ?? 0, text: Buffer.concat(parts).toString() }
+            complete()
+          })
         })
+        req.on('finish', () => { uploaded = true; complete() })
         req.on('error', reject)
         req.end(body)
       })
@@ -79,6 +89,44 @@ describe('configured request size reaches both SDK adapters', () => {
       ? accepted.text.split('\n').find(line => line.startsWith('data: '))?.slice(6) : accepted.text
     expect(JSON.parse(payload ?? '')).toMatchObject({ result: { serverInfo: { name: 'deepseek-harness-mcp-control' } } })
     expect((await initialize(5_500_000)).status).toBe(413)
+  })
+})
+
+describe('session_start admission serialization', () => {
+  it('holds the admission slot after a deadline and endpoint reload', { timeout: 20000 }, async () => {
+    const h = await boot({ mountControl: false })
+    const config = controlConfig({ requestTimeoutMs: 350 })
+    const mounted = await h.ctx.plugin(McpControl, config).await()
+    const first = await clientFor(h)
+    const args = { cwd: h.workspace, prompt: 'one task', request_id: 'root-delivery', session_id: 'root-admission' }
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const original = h.ctx.sessionController.prompt.bind(h.ctx.sessionController)
+    const native = vi.spyOn(h.ctx.sessionController, 'prompt').mockImplementation(async request => {
+      await gate
+      return await original(request, new AbortController().signal)
+    })
+    try {
+      expect(textJson(await first.callTool({ name: 'session_start', arguments: args })))
+        .toMatchObject({ error: { code: 'mcp-control/request-timeout', details: { stage: 'prompt' } } })
+      await first.close()
+      await mounted.dispose()
+      await h.ctx.plugin(McpControl, config).await()
+      const retry = await clientFor(h)
+      expect(textJson(await retry.callTool({ name: 'session_start', arguments: args })))
+        .toMatchObject({ error: { code: 'mcp-control/request-timeout' } })
+      expect(native).toHaveBeenCalledTimes(1)
+      release()
+      await h.ctx.agents.get(SessionId(args.session_id))?.whenIdle()
+      const recovered = await retry.callTool({ name: 'session_start', arguments: args })
+      expect(recovered.isError).not.toBe(true)
+      expect(native).toHaveBeenCalledTimes(1)
+      await vi.waitFor(async () => {
+        const events = (await h.ctx.sessionController.inspect(SessionId(args.session_id))).events
+        expect(events.filter(e => e.type === 'user/message'
+          && (e.data as { source?: { rpcId?: string } }).source?.rpcId === args.request_id)).toHaveLength(1)
+      })
+    } finally { release() }
   })
 })
 

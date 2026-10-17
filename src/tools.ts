@@ -20,6 +20,7 @@ import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
 import { sendChildOnce } from './child-send.ts'
+import { acceptedPromptId } from './prompt-receipt.ts'
 import { checkCwd, gitLayoutOf, isFullyQualifiedPath, isWithin, type GitLayout, type WorktreeFacts } from './paths.ts'
 import { registerSessionStatus, rpcIdOf } from './status.ts'
 import { registerTurnResult } from './turn-result.ts'
@@ -173,10 +174,10 @@ function textContent(text: string): [{ type: 'text'; text: string }] {
 }
 
 /** Register `session_start`: create or adopt a root session, then submit one prompt. */
-const startSlotsByContext = new WeakMap<ControlDeps['ctx'], Map<string, Promise<void>>>()
+const startSlotsByContext = new WeakMap<ControlDeps['ctx']['root'], Map<string, Promise<void>>>()
 function registerSessionStart(server: McpServer, deps: ControlDeps): void {
-  const startSlots = startSlotsByContext.get(deps.ctx) ?? new Map<string, Promise<void>>()
-  startSlotsByContext.set(deps.ctx, startSlots)
+  const startSlots = startSlotsByContext.get(deps.ctx.root) ?? new Map<string, Promise<void>>()
+  startSlotsByContext.set(deps.ctx.root, startSlots)
   const permissionPresetSchema = z.enum(deps.ctx.permissionPresets.names)
     .describe(`Native DSH permission preset applied before the first prompt. Available: ${deps.ctx.permissionPresets.names.join(', ')}.`)
   server.registerTool(
@@ -255,8 +256,16 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         : args.request_id === undefined
           ? mintSessionId()
           : derivedSessionId(args.request_id, canonicalCwd, args.prompt)
+      let acquired: Awaited<ReturnType<typeof acquireStartSlot>>
       try {
-        using slot = await acquireStartSlot(startSlots, attempted, guard.signal)
+        acquired = await acquireStartSlot(startSlots, attempted, guard.signal)
+      } catch (error: unknown) {
+        return failureResult(deps, error, guard.signal, { session_id: attempted, request_id: requestId, stage: 'create' })
+      }
+      // The slot covers creation AND prompt admission, retaining unresolved
+      // native work after a deadline and surviving endpoint reloads.
+      using slot = acquired
+      try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         let workspace = await withinDeadline(
           deps.ctx.workspaceRegistry.resolveByPath(args.cwd).catch(() => undefined),
@@ -336,12 +345,14 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         return failureResult(deps, error, guard.signal, { ...correlation, stage: 'permission' })
       }
       try {
-        await withinDeadline(deps.ctx.sessionController.prompt({
+        const inspected = await withinDeadline(deps.ctx.sessionController.inspect(sessionId, guard.signal), guard.signal)
+        const prior = acceptedPromptId(inspected.events.slice(inspected.inheritedEventCount), requestId)
+        if (prior === undefined) await withinDeadline(slot.track(deps.ctx.sessionController.prompt({
           requestId,
           sessionId,
           mode: 'queue',
           content: textContent(args.prompt),
-        }, guard.signal), guard.signal)
+        }, guard.signal)), guard.signal)
       } catch (error: unknown) {
         // The session was created and is deliberately not rolled back, so the
         // caller can locate it and decide whether to resend.

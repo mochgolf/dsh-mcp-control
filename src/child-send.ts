@@ -4,24 +4,12 @@ import { openingSnapshot } from './log.ts'
 import { withinDeadline, type ControlDeps } from './result.ts'
 import { acquireStartSlot } from './start-slot.ts'
 import { rpcIdOf } from './status.ts'
+import { acceptedPromptId } from './prompt-receipt.ts'
 
 // Cordis exposes context-bound service proxies, so their object identity is
 // unsuitable for a cross-request lock. The root survives connections/reloads.
 // A pending admission retains its slot even if the HTTP caller leaves.
 const slotsByRuntime = new WeakMap<ControlDeps['ctx']['root'], Map<string, Promise<void>>>()
-
-/** Find the accepted identity, including prompts canceled or claimed before user/message is written. */
-function acceptedId(events: readonly { type: string; data: unknown }[], requestId: string): string | undefined {
-  for (const event of events) {
-    const data = event.data as { id?: unknown; source?: unknown; inserted?: readonly { id?: unknown; source?: unknown }[] }
-    const messages = event.type === 'user/message' ? [data]
-      : event.type === 'agent/inbox/spliced' ? data.inserted ?? [] : []
-    for (const message of messages) {
-      if (rpcIdOf(message.source) === requestId && typeof message.id === 'string') return message.id
-    }
-  }
-  return undefined
-}
 
 /** Serialize one request identity, authorize the durable address, and reuse an accepted receipt. */
 export async function sendChildOnce(deps: ControlDeps, request: Parameters<ControlDeps['ctx']['subagents']['prompt']>[0], signal: AbortSignal): Promise<string> {
@@ -44,7 +32,7 @@ export async function sendChildOnce(deps: ControlDeps, request: Parameters<Contr
   if (queued !== undefined) return queued.id
   const inspected = await withinDeadline(deps.ctx.sessionController.inspect(request.childSessionId, signal), signal)
   // Fork-inherited parent history cannot count as admission to this child.
-  const prior = acceptedId(inspected.events.slice(inspected.inheritedEventCount), request.requestId)
+  const prior = acceptedPromptId(inspected.events.slice(inspected.inheritedEventCount), request.requestId)
   if (prior !== undefined) return prior
   const receipt = await withinDeadline(slot.track(runtime.prompt(request, signal)), signal)
   return receipt.messageId
