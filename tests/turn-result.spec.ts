@@ -141,6 +141,8 @@ describe('turn_result', () => {
     const session = harness.ctx.sessions.get(SessionId('many-asks'))!
     const append = session.append.bind(session) as (type: string, data: unknown) => void
     for (let index = 0; index < 23; index += 1) append('approval/asked', { id: `approval-${String(index)}`, toolName: 'bash' })
+    // Zero-wait reads observe durable storage, so settle the fixture's buffered events first.
+    await harness.ctx.sessions.flush(session)
     const result = await turnResult(client, 'many-asks', 'R1', 0)
     expect(result).toMatchObject({ state: 'blocked_on_approval', pending_approvals_omitted: 3 })
     expect(result.pending_approvals).toHaveLength(20)
