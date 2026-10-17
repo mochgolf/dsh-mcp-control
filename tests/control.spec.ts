@@ -451,6 +451,9 @@ describe('session_send', () => {
       request_id: 'repeated-request',
     })
     expect(second).toEqual(first)
+    // Acceptance precedes the turn and its durable append; count after both settle.
+    await harness.ctx.agents.get(SessionId('root-duplicate'))!.whenIdle()
+    await harness.ctx.sessions.flush(harness.ctx.sessions.get(SessionId('root-duplicate'))!)
     const repeated = (await eventsOf(harness, 'root-duplicate'))
       .filter(event => event.type === 'user/message' && rpcIdOf(event) === 'repeated-request')
     expect(repeated).toHaveLength(1)
