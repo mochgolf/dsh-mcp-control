@@ -56,7 +56,7 @@ async function expectOne(h: Harness, args: { child_session_id: string; request_i
 describe('configured request size reaches both SDK adapters', () => {
   it('accepts a valid request above 4MiB, and still rejects bytes above the configured cap', async () => {
     const h = await boot({ config: { maxRequestBytes: 5 * 1024 * 1024 } })
-    async function initialize(size: number) {
+    async function initialize(size: number, sendBody = true) {
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
         protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x'.repeat(size), version: '1' },
       } })
@@ -64,8 +64,7 @@ describe('configured request size reaches both SDK adapters', () => {
         let answer: { status: number; text: string } | undefined
         let uploaded = false
         const complete = () => { if (uploaded && answer !== undefined) resolve(answer) }
-        // Own this exchange's socket. An early 413 may arrive while Node is
-        // still writing the body; don't dispose the server in that interval.
+        // Own this exchange's socket and await both upload and response.
         const req = request({ host: '127.0.0.1', port: h.port, path: '/mcp', method: 'POST', agent: false, headers: {
           authorization: `Bearer ${TEST_TOKEN}`, 'content-type': 'application/json',
           accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(body),
@@ -80,7 +79,7 @@ describe('configured request size reaches both SDK adapters', () => {
         })
         req.on('finish', () => { uploaded = true; complete() })
         req.on('error', reject)
-        req.end(body)
+        req.end(sendBody ? body : undefined)
       })
     }
     const accepted = await initialize(4_500_000)
@@ -88,7 +87,10 @@ describe('configured request size reaches both SDK adapters', () => {
     const payload = accepted.text.startsWith('event:')
       ? accepted.text.split('\n').find(line => line.startsWith('data: '))?.slice(6) : accepted.text
     expect(JSON.parse(payload ?? '')).toMatchObject({ result: { serverInfo: { name: 'deepseek-harness-mcp-control' } } })
-    expect((await initialize(5_500_000)).status).toBe(413)
+    // The declared size is refused before intake. Don't race an intentionally
+    // rejected multi-megabyte upload against the server's early close; the
+    // guard tests separately cover received bytes exceeding the ceiling.
+    expect((await initialize(5_500_000, false)).status).toBe(413)
   })
 })
 
