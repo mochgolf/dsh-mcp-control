@@ -19,6 +19,7 @@ import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
+import { sendChildOnce } from './child-send.ts'
 import { checkCwd, gitLayoutOf, isFullyQualifiedPath, isWithin, type GitLayout, type WorktreeFacts } from './paths.ts'
 import { registerSessionStatus, rpcIdOf } from './status.ts'
 import { registerTurnResult } from './turn-result.ts'
@@ -509,7 +510,8 @@ function registerChildSend(server: McpServer, deps: ControlDeps): void {
       title: 'Send to a continuable DSH subagent',
       description:
         'Deliver one text prompt to an existing continuable DSH subagent through its live direct parent. The direct parent must be live; a cold parent is refused rather than resumed. '
-        + 'Returns the inbox identity of the accepted message; later execution is independent of this call.',
+        + 'Returns the inbox identity of the accepted message; later execution is independent of this call. '
+        + 'Use a fresh request_id for each new message and reuse it unchanged on retry: an already accepted request returns its original message_id without delivering again, even after plugin reload.',
       inputSchema: boundedInputSchema(deps, 'child_send', z.strictObject({
         parent_session_id: opaqueId,
         child_session_id: opaqueId,
@@ -535,15 +537,14 @@ function registerChildSend(server: McpServer, deps: ControlDeps): void {
       }
       let messageId: string
       try {
-        const receipt = await withinDeadline(deps.ctx.subagents.prompt({
+        messageId = await sendChildOnce(deps, {
           requestId,
           parentSessionId: SessionId(args.parent_session_id),
           childSessionId: SessionId(args.child_session_id),
           mode: 'continuable',
           delivery: args.delivery,
           content: textContent(args.message),
-        }, guard.signal), guard.signal)
-        messageId = receipt.messageId
+        }, guard.signal)
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, correlation)
       }

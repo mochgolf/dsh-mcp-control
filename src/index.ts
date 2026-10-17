@@ -176,8 +176,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const deps: ControlDeps = { ctx, config: resolved, unload: unload.signal }
   const inFlight = new Set<InFlightRequest>()
   const report = (error: Error): void => { ctx.logger.warn('mcp-control: %s', error.message) }
-  const handler = createMcpHandler(() => createControlServer(deps), { legacy: 'stateless', onerror: report })
-  const nodeHandler = toNodeHandler(handler, { onerror: report })
+  const handler = createMcpHandler(() => createControlServer(deps), {
+    legacy: 'stateless', onerror: report, maxRequestBodySize: resolved.maxRequestBytes,
+  })
+  const nodeHandler = toNodeHandler(handler, { onerror: report, maxRequestBodySize: resolved.maxRequestBytes })
   const port = ctx.webServer.port
   if (port === undefined) throw new Error('mcp-control requires a listening WebServer')
   const serve = createRequestHandler(deps, tokenRef, port, async (request, response, body) => {
