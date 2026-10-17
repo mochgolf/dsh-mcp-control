@@ -93,6 +93,8 @@ tool_timeout_sec = 30
 
 `session_status` 在不激活会话的前提下报告它当前在做什么：`agent_status`（`running`、`idle` 或 `not_loaded`）、最新 `turn` 及其是否仍未结束、持久化收件箱中每条仍在等待的提示词及其 `request_id`（与日志取自同一次观察，因此即使没有已加载的 Agent 也会报告），以及未结束轮次正在等待的 `pending_approvals`（最多 20 条，其余数量由 `pending_approvals_omitted` 给出）。它能区分只读日志的调用者分辨不出的三种状态：轮次仍在计算、轮次被只有人类才能在 Web UI 中作出的决定阻塞、提示词滞留在收件箱中。滞留的提示词不会自行开始：`session_cancel` 默认保留等待中的提示词，而之后任何一条提示词唤醒 Agent 时它们就会立即执行，因此需要传入 `clear_queue: true`，在中断之前通过控制器自身的队列修改把它们移除。中断与移除都需要 Agent 已加载：对于 Agent 未加载的会话，`session_cancel` 会返回 `session/not-found`（并用 `removed_queue_items` 与 `removed_queue_item_count` 列出已经移除的条目），而为它排队的提示词会在之后某条提示词激活该会话时执行。
 
+`child_send` 按同一父子地址下的 `request_id` 对接收去重：新工作使用新 id，重试原样复用。并发重试、回执丢失和端点重载后，只要已接收就返回原 `message_id`；进程重启后也能从原生 inbox/日志恢复回执，而不恢复子 Agent。冷父级或无权访问的父子地址仍会被拒绝。已经接收、随后被丢弃的消息不会因重试重新入队；要重新执行，应明确使用新的 id。
+
 `agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
 
 ### 读取 durable 事件
@@ -158,7 +160,7 @@ tool_timeout_sec = 30
 
 ### 设计
 
-- **端点不拥有状态。** 会话、subagent 关系、inbox 与事件日志属于 Session Controller、subagent 运行时与会话持久化。插件只持有一个路由注册、MCP SDK handler，以及干净卸载所需的请求生命周期句柄。
+- **原生服务拥有持久状态。** 会话、subagent 关系、inbox 与事件日志属于 Session Controller、subagent 运行时与会话持久化。插件只保留路由/SDK 生命周期句柄和仍在接收中的互斥门控；已接收的子消息回执从原生记录恢复。
 - **单一监听器。** 路由通过 `ctx.effect(() => ctx.webServer.register(...))` 注册到共享的 `ctx.webServer`；不存在第二个 `createServer()`、没有 daemon，也没有私有 wire client。
 - **原生权威做决定。** `child_send` 经 `ctx.subagents.prompt` 并使用 `mode: continuable`，`child_interrupt` 经 `interruptByParent`，因此 live direct parent 要求与寻址校验留在 DSH 已经实施它们的地方。端点从不恢复 parent、从不列出它无法寻址的对象，也不重编号原生条目。
 - **卸载会结束本插件的请求。** 释放时注销路由、中止插件自身的 signal、结束仍在进行中的每个请求——正在接收的请求体，以及 SDK 仍在向停止读取的客户端写入的响应，都会因此结算——然后等待这些请求并关闭 SDK handler。结束请求只会断开它的连接；它不撤销 DSH 已经接收的工作，也不关闭共享 WebServer、不 dispose Session Controller，也不停止任何 Agent。

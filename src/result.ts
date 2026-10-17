@@ -9,6 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
+import { SessionQueryError } from '@deepseek-ai/dsh-session-query'
 import { deadline, timeoutOf, type Deadline } from '@deepseek-ai/dsh-timeout'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import type { CallToolResult, ServerContext, StandardSchemaV1, StandardSchemaWithJSON } from '@modelcontextprotocol/server'
@@ -165,13 +166,13 @@ export function okWithinBudget(deps: ControlDeps, value: Record<string, unknown>
  * @throws the signal's abort reason when the deadline or a cancellation wins.
  */
 export async function withinDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted()
   let onAbort: (() => void) | undefined
-  const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => { reject(signal.reason as Error) }
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
   try {
+    signal.throwIfAborted()
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => { reject(signal.reason as Error) }
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
     return await Promise.race([work, aborted])
   } finally {
     // One call can await many native operations on the same signal — a
@@ -319,6 +320,14 @@ export function failureResult(
       ...correlation,
       receipt: 'unknown',
     })
+  }
+  if (error instanceof SessionQueryError) {
+    if (error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') {
+      return errorResult(deps, 'session/not-found', error.message, {
+        ...correlation, sessionId: correlation.root_session_id,
+      })
+    }
+    return errorResult(deps, error.code, error.message, correlation)
   }
   return errorResult(deps, 'mcp-control/internal', 'the DSH operation failed', correlation)
 }

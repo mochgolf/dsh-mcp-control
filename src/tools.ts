@@ -19,6 +19,8 @@ import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { McpServer } from '@modelcontextprotocol/server'
 import { z } from 'zod'
 import { registerEventsRead } from './events.ts'
+import { sendChildOnce } from './child-send.ts'
+import { acceptedPromptId } from './prompt-receipt.ts'
 import { checkCwd, gitLayoutOf, isFullyQualifiedPath, isWithin, type GitLayout, type WorktreeFacts } from './paths.ts'
 import { registerSessionStatus, rpcIdOf } from './status.ts'
 import { registerTurnResult } from './turn-result.ts'
@@ -172,10 +174,10 @@ function textContent(text: string): [{ type: 'text'; text: string }] {
 }
 
 /** Register `session_start`: create or adopt a root session, then submit one prompt. */
-const startSlotsByContext = new WeakMap<ControlDeps['ctx'], Map<string, Promise<void>>>()
+const startSlotsByContext = new WeakMap<ControlDeps['ctx']['root'], Map<string, Promise<void>>>()
 function registerSessionStart(server: McpServer, deps: ControlDeps): void {
-  const startSlots = startSlotsByContext.get(deps.ctx) ?? new Map<string, Promise<void>>()
-  startSlotsByContext.set(deps.ctx, startSlots)
+  const startSlots = startSlotsByContext.get(deps.ctx.root) ?? new Map<string, Promise<void>>()
+  startSlotsByContext.set(deps.ctx.root, startSlots)
   const permissionPresetSchema = z.enum(deps.ctx.permissionPresets.names)
     .describe(`Native DSH permission preset applied before the first prompt. Available: ${deps.ctx.permissionPresets.names.join(', ')}.`)
   server.registerTool(
@@ -254,8 +256,16 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         : args.request_id === undefined
           ? mintSessionId()
           : derivedSessionId(args.request_id, canonicalCwd, args.prompt)
+      let acquired: Awaited<ReturnType<typeof acquireStartSlot>>
       try {
-        using slot = await acquireStartSlot(startSlots, attempted, guard.signal)
+        acquired = await acquireStartSlot(startSlots, attempted, guard.signal)
+      } catch (error: unknown) {
+        return failureResult(deps, error, guard.signal, { session_id: attempted, request_id: requestId, stage: 'create' })
+      }
+      // The slot covers creation AND prompt admission, retaining unresolved
+      // native work after a deadline and surviving endpoint reloads.
+      using slot = acquired
+      try {
         // Workspace lookup only adds UI grouping; a path the registry cannot inspect retains native cwd creation.
         let workspace = await withinDeadline(
           deps.ctx.workspaceRegistry.resolveByPath(args.cwd).catch(() => undefined),
@@ -335,12 +345,14 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         return failureResult(deps, error, guard.signal, { ...correlation, stage: 'permission' })
       }
       try {
-        await withinDeadline(deps.ctx.sessionController.prompt({
+        const inspected = await withinDeadline(deps.ctx.sessionController.inspect(sessionId, guard.signal), guard.signal)
+        const prior = acceptedPromptId(inspected.events.slice(inspected.inheritedEventCount), requestId)
+        if (prior === undefined) await withinDeadline(slot.track(deps.ctx.sessionController.prompt({
           requestId,
           sessionId,
           mode: 'queue',
           content: textContent(args.prompt),
-        }, guard.signal), guard.signal)
+        }, guard.signal)), guard.signal)
       } catch (error: unknown) {
         // The session was created and is deliberately not rolled back, so the
         // caller can locate it and decide whether to resend.
@@ -509,7 +521,8 @@ function registerChildSend(server: McpServer, deps: ControlDeps): void {
       title: 'Send to a continuable DSH subagent',
       description:
         'Deliver one text prompt to an existing continuable DSH subagent through its live direct parent. The direct parent must be live; a cold parent is refused rather than resumed. '
-        + 'Returns the inbox identity of the accepted message; later execution is independent of this call.',
+        + 'Returns the inbox identity of the accepted message; later execution is independent of this call. '
+        + 'Use a fresh request_id for each new message and reuse it unchanged on retry: an already accepted request returns its original message_id without delivering again, even after plugin reload.',
       inputSchema: boundedInputSchema(deps, 'child_send', z.strictObject({
         parent_session_id: opaqueId,
         child_session_id: opaqueId,
@@ -535,15 +548,14 @@ function registerChildSend(server: McpServer, deps: ControlDeps): void {
       }
       let messageId: string
       try {
-        const receipt = await withinDeadline(deps.ctx.subagents.prompt({
+        messageId = await sendChildOnce(deps, {
           requestId,
           parentSessionId: SessionId(args.parent_session_id),
           childSessionId: SessionId(args.child_session_id),
           mode: 'continuable',
           delivery: args.delivery,
           content: textContent(args.message),
-        }, guard.signal), guard.signal)
-        messageId = receipt.messageId
+        }, guard.signal)
       } catch (error: unknown) {
         return failureResult(deps, error, guard.signal, correlation)
       }
