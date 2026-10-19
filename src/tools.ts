@@ -193,6 +193,8 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         + 'git_worktree names that main checkout and its workspace, and warnings explain when git commits will be denied by the sandbox. '
         + 'Omit agent_preset to use the deployment\'s configured default; set it only as an intentional, known override. '
         + 'Set permission_preset to a native DSH preset such as "read-only"; it is applied before the first prompt, while cwd still names the real project. '
+        + 'Set provider and model together, with optional reasoning_effort, to initialize a new Session\'s model without changing the deployment default. '
+        + 'The initial model is validated and logged before the new Agent is published; the deployment default is never saved. For an existing Session, supplied model fields must match its stored initial choice; matching calls continue through native prompt admission. '
         + 'Returns once DSH accepts the prompt and never waits for the turn to finish. '
         + 'Pass a fresh request_id (a UUID) for every new start and reuse it unchanged when retrying: without session_id, the same request_id, cwd, and prompt always address the same Session, '
         + 'so a retry after a lost or timed-out receipt adopts the Session the first attempt created and does not submit the prompt twice. '
@@ -204,6 +206,9 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         agent_preset: z.string().min(1).max(256).optional()
           .describe('Explicit DSH Agent preset override. Omit it to use the deployment default.'),
         permission_preset: permissionPresetSchema.optional(),
+        provider: opaqueId.optional().describe('Explicit model provider; requires model.'),
+        model: opaqueId.optional().describe('Explicit provider-local model id; requires provider.'),
+        reasoning_effort: opaqueId.optional().describe('Native reasoning effort id; requires provider and model. Unsupported ids are refused by DSH.'),
         session_id: opaqueId.optional()
           .describe('Explicit Session identity to create or adopt. Omit it to derive one from request_id, cwd, and prompt.'),
         request_id: requestIdSchema.optional()
@@ -214,6 +219,24 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
     async (args, context) => {
       const requestId = resolveRequestId(args.request_id)
       using guard = operationDeadline(deps, context)
+      if ((args.provider === undefined) !== (args.model === undefined)
+        || (args.reasoning_effort !== undefined && args.model === undefined)) {
+        return errorResult(deps, 'gateway/bad-request', 'provider and model must be supplied together; reasoning_effort requires both.', {
+          request_id: requestId, stage: 'model',
+        })
+      }
+      if (args.model !== undefined) {
+        // Published hosts share a version with earlier builds. The mounted
+        // descriptor identifies the running initialization capability.
+        const codec = deps.ctx.typert.local.get('session/create')?.parameters.find(parameter => parameter.name === 'request')?.codec
+        const properties = codec?.mode === 'strict' ? codec.jsonSchema?.properties : undefined
+        const flag = properties !== null && typeof properties === 'object' && 'modelSelection' in properties ? properties.modelSelection : undefined
+        if (flag === null || typeof flag !== 'object' || !('type' in flag) || flag.type !== 'object') {
+          return errorResult(deps, 'session/model-selection-unsupported', 'The running DSH host does not support an initial modelSelection on session/create. Upgrade the host before selecting a model through MCP.', {
+            request_id: requestId, stage: 'model',
+          })
+        }
+      }
       let sessionId: SessionId
       let resolvedCwd = args.cwd
       let workspaceReceipt: { id: string; title: string } | null = null
@@ -299,6 +322,21 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         catch (error: unknown) { if (!(error instanceof ApiSessionNotFound) && remoteErrorOf(error)?.code !== 'session/not-found') throw error }
         let created: { sessionId: SessionId; agentPreset?: string }
         if (existing !== undefined) {
+          if (args.model !== undefined) {
+            const own = existing.events.slice(existing.inheritedEventCount)
+            const firstPrompt = own.findIndex(event => event.type === 'user/message' || event.type === 'agent/inbox/spliced' || event.type === 'turn/start')
+            const initial = firstPrompt === -1 ? own : own.slice(0, firstPrompt)
+            const selected = initial.find(event => event.type === 'model/selection')?.data
+            const matches = selected !== null && typeof selected === 'object'
+              && 'provider' in selected && selected.provider === args.provider
+              && 'model' in selected && selected.model === args.model
+              && (args.reasoning_effort === undefined || ('reasoningEffort' in selected && selected.reasoningEffort === args.reasoning_effort))
+            if (!matches) {
+              return errorResult(deps, 'mcp-control/model-conflict', 'The named Session has a different initial model selection. Reuse the original start inputs or start a new Session.', {
+                session_id: attempted, request_id: requestId, stage: 'model',
+              })
+            }
+          }
           const cwd = existing.meta.cwd === undefined ? undefined : await withinDeadline(checkCwd(existing.meta.cwd), guard.signal)
           if (cwd?.ok !== true || cwd.canonical !== canonicalCwd) {
             throw new RemoteError('session/conflict', 'the named Session owns a different working directory', { sessionId: attempted, requestedCwd: args.cwd, ...(existing.meta.cwd === undefined ? {} : { existingCwd: existing.meta.cwd }) })
@@ -318,6 +356,10 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
             ...(workspace === undefined ? { cwd: args.cwd } : { workspaceId: workspace.id }),
             sessionId: attempted,
             ...(args.agent_preset === undefined ? {} : { agentPreset: args.agent_preset }),
+            ...(args.model === undefined ? {} : { modelSelection: {
+              provider: args.provider!, model: args.model,
+              ...(args.reasoning_effort === undefined ? {} : { reasoningEffort: args.reasoning_effort }),
+            } }),
           })), guard.signal)
         }
         sessionId = created.sessionId
@@ -328,7 +370,7 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
         return failureResult(deps, error, guard.signal, {
           session_id: attempted,
           request_id: requestId,
-          stage: 'create',
+          stage: remoteErrorOf(error)?.code === 'session/model-unavailable' ? 'model' : 'create',
         })
       }
       const correlation = { session_id: sessionId, request_id: requestId }
@@ -354,8 +396,6 @@ function registerSessionStart(server: McpServer, deps: ControlDeps): void {
           content: textContent(args.prompt),
         }, guard.signal)), guard.signal)
       } catch (error: unknown) {
-        // The session was created and is deliberately not rolled back, so the
-        // caller can locate it and decide whether to resend.
         return failureResult(deps, error, guard.signal, { ...correlation, stage: 'prompt' })
       }
       return okWithinBudget(deps, {

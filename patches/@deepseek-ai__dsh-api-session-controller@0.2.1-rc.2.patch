@@ -1,0 +1,304 @@
+diff --git a/lib/index.js b/lib/index.js
+index 730b8a4116b1a81ecb72273a9629ae55bebbb4c5..7692c85160e7f9360348e933b4d8a0af7522f616 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -263,7 +263,10 @@ var ApiSessionAgentController = class {
+ 	*/
+ 	async createSession(request) {
+ 		const named = request.sessionId;
+-		if (named === void 0) return this.created(await this.createMinted(request.cwd, await this.composeAgent(request.agentPreset)));
++		if (named === void 0) {
++			const composition = await this.composeAgent(request.agentPreset, request.modelSelection);
++			return this.created(await this.createMinted(request.cwd, composition));
++		}
+ 		return this.inOrder(named, async () => this.created(await this.claim(named, request)));
+ 	}
+ 	/**
+@@ -346,18 +349,19 @@ var ApiSessionAgentController = class {
+ 	/**
+ 	* Resolve the preset id and pre-publication Agent setup for a create or resume.
+ 	* @param presetId - requested preset or the configured default when omitted.
++	* @param modelSelection - validated initial model for a fresh Session; omitted when restoring its logged choice.
+ 	* @returns the resolved preset identity and Agent setup callback.
+ 	*/
+-	async composeAgent(presetId) {
++	async composeAgent(presetId, modelSelection) {
+ 		const presets = this.ctx.get("agentPresets");
+ 		if (presets === void 0) return { setup: (_agentCtx, agent) => {
+-			this.installSelection(agent);
++			this.installSelection(agent, modelSelection);
+ 		} };
+ 		const resolvedId = (await presets.resolve(presetId)).id;
+ 		return {
+ 			agentPreset: resolvedId,
+ 			setup: async (agentCtx, agent) => {
+-				this.installSelection(agent);
++				this.installSelection(agent, modelSelection);
+ 				await presets.mount(agentCtx, resolvedId);
+ 			}
+ 		};
+@@ -419,7 +423,7 @@ var ApiSessionAgentController = class {
+ 		if (attached !== void 0 && hasApiSessionSubagentOwner(this.ctx, attached, live)) throw new ApiSessionSubagentOwnership(sessionId);
+ 		if (live !== void 0) {
+ 			if (live.session.header.cwd !== request.cwd) throw new ApiSessionCwdConflict(live.id, request.cwd, live.session.header.cwd);
+-			const composition = await this.composeAgent(request.agentPreset);
++			const composition = await this.composeAgent(request.agentPreset, request.modelSelection);
+ 			return await this.reuseLive(live, request, composition) ?? this.createMinted(request.cwd, composition);
+ 		}
+ 		let observation;
+@@ -427,7 +431,7 @@ var ApiSessionAgentController = class {
+ 			observation = await this.ctx.sessionQuery.observeSession(sessionId);
+ 		} catch (error) {
+ 			if (!(error instanceof SessionQueryError) || error.code !== "SESSION_QUERY_SESSION_NOT_FOUND") throw error;
+-			return this.createAgent(sessionId, request.cwd, await this.composeAgent(request.agentPreset));
++			return this.createAgent(sessionId, request.cwd, await this.composeAgent(request.agentPreset, request.modelSelection));
+ 		}
+ 		let reusable;
+ 		{
+@@ -440,7 +444,7 @@ var ApiSessionAgentController = class {
+ 				const observed = __addDisposableResource$4(env_3, observation, false);
+ 				if (hasApiSessionSubagentOwner(this.ctx, { header: observed.header }, void 0)) throw new ApiSessionSubagentOwnership(sessionId);
+ 				if (observed.header.cwd !== request.cwd) throw new ApiSessionCwdConflict(sessionId, request.cwd, observed.header.cwd);
+-				reusable = request.reusable(sessionId) && !observed.events.some((event) => event.type === "turn/start");
++				reusable = request.modelSelection === void 0 && request.reusable(sessionId) && !observed.events.some((event) => event.type === "turn/start");
+ 			} catch (e_3) {
+ 				env_3.error = e_3;
+ 				env_3.hasError = true;
+@@ -448,7 +452,7 @@ var ApiSessionAgentController = class {
+ 				__disposeResources$4(env_3);
+ 			}
+ 		}
+-		const composition = await this.composeAgent(request.agentPreset);
++		const composition = await this.composeAgent(request.agentPreset, request.modelSelection);
+ 		if (!reusable) return this.createMinted(request.cwd, composition);
+ 		this.assertPresetApplicable(sessionId, request.agentPreset);
+ 		try {
+@@ -465,7 +469,7 @@ var ApiSessionAgentController = class {
+ 	}
+ 	/** @returns the live blank Session under the requested preset, or undefined when it cannot be reused. */
+ 	async reuseLive(live, request, composition) {
+-		if (!request.reusable(live.id) || !this.isBlank(live.session)) return void 0;
++		if (request.modelSelection !== void 0 || !request.reusable(live.id) || !this.isBlank(live.session)) return void 0;
+ 		this.assertPresetApplicable(live.id, request.agentPreset);
+ 		const current = this.presetForSession(live.session);
+ 		const presets = this.ctx.get("agentPresets");
+@@ -531,8 +535,9 @@ var ApiSessionAgentController = class {
+ 			model
+ 		};
+ 	}
+-	installSelection(agent) {
++	installSelection(agent, initial) {
+ 		this.selectionFor(agent);
++		if (initial !== void 0) this.selectForNextRequest(agent, initial);
+ 	}
+ 	/**
+ 	* Read the current Agent preset from an all-projections observation.
+@@ -760,12 +765,14 @@ var SessionCommandController = class {
+ 			if (workspace === void 0) throw new RemoteError("workspace/not-found", `workspace "${request.workspaceId}" not found`, { workspaceId: request.workspaceId });
+ 		}
+ 		const cwd = workspace?.path ?? request.cwd ?? this.defaultCwd;
++		const modelSelection = request.modelSelection === void 0 ? void 0 : await this.resolveModelSelection(request.modelSelection);
+ 		let created;
+ 		try {
+ 			created = await this.agents.createSession({
+ 				...request.sessionId === void 0 ? {} : { sessionId: request.sessionId },
+ 				cwd,
+ 				...request.agentPreset === void 0 ? {} : { agentPreset: request.agentPreset },
++				...modelSelection === void 0 ? {} : { modelSelection },
+ 				reusable: (sessionId) => !this.ctx.workspaceRegistry.archivedSessionIds.includes(sessionId) && (workspace === void 0 || workspace.sessionIds.includes(sessionId))
+ 			});
+ 		} catch (error) {
+@@ -794,17 +801,7 @@ var SessionCommandController = class {
+ 		const agent = await this.resolveAgent(request.sessionId);
+ 		return this.agents.serializeImageAdmission(agent, async () => {
+ 			try {
+-				await this.requireModel(request);
+-				const resolved = await this.ctx.llm.resolveCallConfig({
+-					provider: request.provider,
+-					model: request.model,
+-					...request.reasoningEffort === void 0 ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }
+-				});
+-				const selected = {
+-					provider: resolved.provider,
+-					model: resolved.model,
+-					...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
+-				};
++				const selected = await this.resolveModelSelection(request);
+ 				this.agents.selectForNextRequest(agent, selected);
+ 				this.ctx.agentDefaultModel.saveSelection(selected).catch((error) => {
+ 					this.ctx.logger.warn(`session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`);
+@@ -819,6 +816,27 @@ var SessionCommandController = class {
+ 			}
+ 		});
+ 	}
++	async resolveModelSelection(request) {
++		try {
++			await this.requireModel(request);
++			const resolved = await this.ctx.llm.resolveCallConfig({
++				provider: request.provider,
++				model: request.model,
++				...request.reasoningEffort === void 0 ? {} : { reasoningEffort: ReasoningEffortId(request.reasoningEffort) }
++			});
++			return {
++				provider: resolved.provider,
++				model: resolved.model,
++				...resolved.reasoningEffort === void 0 ? {} : { reasoningEffort: resolved.reasoningEffort }
++			};
++		} catch (error) {
++			if (remoteErrorOf(error) !== void 0) throw error;
++			throw new RemoteError("session/model-unavailable", error instanceof Error ? error.message : String(error), {
++				provider: request.provider,
++				model: request.model
++			});
++		}
++	}
+ 	/**
+ 	* Normalize and append a user-owned Session title.
+ 	* @param request - Session identity and proposed title.
+diff --git a/lib/typert.host.js b/lib/typert.host.js
+index 417bc0ee2295d06e72b2d6dfdf919349380ffd88..f1b8637c9d8978f86cfec761e0cba6b681b6791c 100644
+--- a/lib/typert.host.js
++++ b/lib/typert.host.js
+@@ -230,6 +230,11 @@ const _deepseek_ai_dsh_api_session_controller_session_create_parameter_0$schema
+   'cwd': z.string().readonly().optional().describe('Directory the Session owns when no Workspace is named.'),
+   'sessionId': z.string().readonly().optional().describe('Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it.'),
+   'agentPreset': z.string().readonly().optional().describe('Preset the Session runs, replacing a reused Session\'s recorded preset; the configured default when omitted.'),
++  'modelSelection': z.object({
++  'provider': z.string().readonly(),
++  'model': z.string().readonly(),
++  'reasoningEffort': z.string().readonly().optional(),
++}).readonly().optional().describe('Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default.'),
+ }))
+ let _deepseek_ai_dsh_api_session_controller_session_create_result$schema$value
+ const _deepseek_ai_dsh_api_session_controller_session_create_result$schema = () => (_deepseek_ai_dsh_api_session_controller_session_create_result$schema$value ??= z.object({
+@@ -1246,6 +1251,11 @@ const _deepseek_ai_dsh_api_session_controller_session_create_parameter_0_strict$
+   'cwd': z.string().readonly().optional().describe('Directory the Session owns when no Workspace is named.'),
+   'sessionId': z.string().readonly().optional().describe('Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it.'),
+   'agentPreset': z.string().readonly().optional().describe('Preset the Session runs, replacing a reused Session\'s recorded preset; the configured default when omitted.'),
++  'modelSelection': z.strictObject({
++  'provider': z.string().readonly(),
++  'model': z.string().readonly(),
++  'reasoningEffort': z.string().readonly().optional(),
++}).readonly().optional().describe('Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default.'),
+ }))
+ let _deepseek_ai_dsh_api_session_controller_session_follow_parameter_0_strict$schema$value
+ const _deepseek_ai_dsh_api_session_controller_session_follow_parameter_0_strict$schema = () => (_deepseek_ai_dsh_api_session_controller_session_follow_parameter_0_strict$schema$value ??= z.strictObject({
+@@ -1532,13 +1542,13 @@ const $remote = createTypertRemoteInfo({
+             mode: 'strict',
+             typeSymbol: '@deepseek-ai/dsh-api-session-controller/types#SessionCreateRequest',
+             create: _deepseek_ai_dsh_api_session_controller_session_create_parameter_0$schema,
+-            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."}},"required":[],"additionalProperties":true},
++            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."},"modelSelection":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"},"reasoningEffort":{"type":"string"}},"required":["provider","model"],"additionalProperties":true,"description":"Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default."}},"required":[],"additionalProperties":true},
+           },
+           strictCodec: {
+             mode: 'strict',
+             typeSymbol: '@deepseek-ai/dsh-api-session-controller/types#SessionCreateRequest',
+             create: _deepseek_ai_dsh_api_session_controller_session_create_parameter_0_strict$schema,
+-            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."}},"required":[],"additionalProperties":false},
++            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."},"modelSelection":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"},"reasoningEffort":{"type":"string"}},"required":["provider","model"],"additionalProperties":false,"description":"Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default."}},"required":[],"additionalProperties":false},
+           },
+         },
+       ],
+@@ -2788,7 +2798,7 @@ export const TYPERT = {
+           },
+           {
+             "name": "SessionCreateRequest",
+-            "declaration": "export interface SessionCreateRequest {\n    readonly workspaceId?: WorkspaceId;\n    readonly cwd?: string;\n    readonly sessionId?: SessionId;\n    readonly agentPreset?: string;\n}"
++            "declaration": "export interface SessionCreateRequest {\n    readonly workspaceId?: WorkspaceId;\n    readonly cwd?: string;\n    readonly sessionId?: SessionId;\n    readonly agentPreset?: string;\n    readonly modelSelection?: ModelSelection;\n}"
+           },
+           {
+             "name": "SessionCreateValue",
+diff --git a/lib/typert.remote-client.js b/lib/typert.remote-client.js
+index 912fb55052d3ba3324b507db34f290164320339d..70dfb88117a0e99c85c1bb3b21ab5e32b23ddd67 100644
+--- a/lib/typert.remote-client.js
++++ b/lib/typert.remote-client.js
+@@ -230,6 +230,11 @@ const _deepseek_ai_dsh_api_session_controller_session_create_parameter_0$schema
+   'cwd': z.string().readonly().optional().describe('Directory the Session owns when no Workspace is named.'),
+   'sessionId': z.string().readonly().optional().describe('Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it.'),
+   'agentPreset': z.string().readonly().optional().describe('Preset the Session runs, replacing a reused Session\'s recorded preset; the configured default when omitted.'),
++  'modelSelection': z.object({
++  'provider': z.string().readonly(),
++  'model': z.string().readonly(),
++  'reasoningEffort': z.string().readonly().optional(),
++}).readonly().optional().describe('Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default.'),
+ }))
+ let _deepseek_ai_dsh_api_session_controller_session_create_result$schema$value
+ const _deepseek_ai_dsh_api_session_controller_session_create_result$schema = () => (_deepseek_ai_dsh_api_session_controller_session_create_result$schema$value ??= z.object({
+@@ -1246,6 +1251,11 @@ const _deepseek_ai_dsh_api_session_controller_session_create_parameter_0_strict$
+   'cwd': z.string().readonly().optional().describe('Directory the Session owns when no Workspace is named.'),
+   'sessionId': z.string().readonly().optional().describe('Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it.'),
+   'agentPreset': z.string().readonly().optional().describe('Preset the Session runs, replacing a reused Session\'s recorded preset; the configured default when omitted.'),
++  'modelSelection': z.strictObject({
++  'provider': z.string().readonly(),
++  'model': z.string().readonly(),
++  'reasoningEffort': z.string().readonly().optional(),
++}).readonly().optional().describe('Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default.'),
+ }))
+ let _deepseek_ai_dsh_api_session_controller_session_follow_parameter_0_strict$schema$value
+ const _deepseek_ai_dsh_api_session_controller_session_follow_parameter_0_strict$schema = () => (_deepseek_ai_dsh_api_session_controller_session_follow_parameter_0_strict$schema$value ??= z.strictObject({
+@@ -1532,13 +1542,13 @@ export const TYPERT_REMOTE = createTypertRemoteInfo({
+             mode: 'strict',
+             typeSymbol: '@deepseek-ai/dsh-api-session-controller/types#SessionCreateRequest',
+             create: _deepseek_ai_dsh_api_session_controller_session_create_parameter_0$schema,
+-            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."}},"required":[],"additionalProperties":true},
++            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."},"modelSelection":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"},"reasoningEffort":{"type":"string"}},"required":["provider","model"],"additionalProperties":true,"description":"Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default."}},"required":[],"additionalProperties":true},
+           },
+           strictCodec: {
+             mode: 'strict',
+             typeSymbol: '@deepseek-ai/dsh-api-session-controller/types#SessionCreateRequest',
+             create: _deepseek_ai_dsh_api_session_controller_session_create_parameter_0_strict$schema,
+-            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."}},"required":[],"additionalProperties":false},
++            jsonSchema: {"type":"object","properties":{"workspaceId":{"type":"string","description":"Workspace the Session joins; exclusive with `cwd`."},"cwd":{"type":"string","description":"Directory the Session owns when no Workspace is named."},"sessionId":{"type":"string","description":"Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."},"agentPreset":{"type":"string","description":"Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."},"modelSelection":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"},"reasoningEffort":{"type":"string"}},"required":["provider","model"],"additionalProperties":false,"description":"Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default."}},"required":[],"additionalProperties":false},
+           },
+         },
+       ],
+diff --git a/lib/types/agent.d.ts b/lib/types/agent.d.ts
+index 2ba77b548ba5ee5a242386d775121c60554180f2..a730a3b5167537a9a575aa76a3982596ee06d32c 100644
+--- a/lib/types/agent.d.ts
++++ b/lib/types/agent.d.ts
+@@ -29,6 +29,8 @@ export declare class ApiSessionPresetConflict extends Error {
+ }
+ /** Placement and Agent preset for one Session created for a new conversation. */
+ export interface ApiSessionCreateRequest {
++    /** Validated initial model, installed before the new Agent is published. */
++    readonly modelSelection?: AgentModelSelection;
+     /** Blank Session to reuse, or the identity of a new Session when none is stored under it. */
+     readonly sessionId?: SessionId;
+     /** Directory the Session owns. */
+@@ -165,9 +167,10 @@ export declare class ApiSessionAgentController {
+     /**
+      * Resolve the preset id and pre-publication Agent setup for a create or resume.
+      * @param presetId - requested preset or the configured default when omitted.
++     * @param modelSelection - validated initial model for a fresh Session; omitted when restoring its logged choice.
+      * @returns the resolved preset identity and Agent setup callback.
+      */
+-    composeAgent(presetId: string | undefined): Promise<ApiSessionComposition>;
++    composeAgent(presetId: string | undefined, modelSelection?: AgentModelSelection): Promise<ApiSessionComposition>;
+     private liveAgent;
+     private resume;
+     private resumeObserved;
+diff --git a/lib/types/commands.d.ts b/lib/types/commands.d.ts
+index ef2bbc409eb8dc1a166d0805763b41a7076eab13..ae1ad5acea3cc1667d7625e315d5a3d703e7cd5e 100644
+--- a/lib/types/commands.d.ts
++++ b/lib/types/commands.d.ts
+@@ -36,6 +36,7 @@ export declare class SessionCommandController {
+      * @returns the normalized selection installed for the Session, without waiting for default persistence.
+      */
+     selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue>;
++    private resolveModelSelection;
+     /**
+      * Normalize and append a user-owned Session title.
+      * @param request - Session identity and proposed title.
+diff --git a/lib/types/types.d.ts b/lib/types/types.d.ts
+index 0b3ebd3117d1c58e152711e1e56b6879c3f44573..23df3b0d8b820c711c233fb6ccaea4ae9b39bbba 100644
+--- a/lib/types/types.d.ts
++++ b/lib/types/types.d.ts
+@@ -290,6 +290,8 @@ export interface SessionCreateRequest {
+     readonly sessionId?: SessionId;
+     /** Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted. */
+     readonly agentPreset?: string;
++    /** Validated initial Session model, logged before publication. Disables blank reuse and never saves the deployment default. */
++    readonly modelSelection?: ModelSelection;
+ }
+ /** Session creation response value. */
+ export interface SessionCreateValue {

@@ -103,6 +103,10 @@ export interface HarnessOptions {
   readonly retainRoots?: boolean
   /** Register the workspace root so session_start can exercise native workspace attachment. */
   readonly registerWorkspace?: boolean
+  /** Reasoning metadata advertised by the scripted adapter. */
+  readonly reasoning?: ConstructorParameters<typeof MockAdapter>[1]
+  /** Observe writes to the deployment default independently of Session selection. */
+  readonly saveDefaultModelSelection?: (selection: ModelSelection) => Promise<void>
 }
 
 /**
@@ -132,7 +136,7 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
     await ctx.plugin(TestSessionQuery).await()
     await ctx.plugin(SubagentRuntime).await()
     await ctx.plugin(SubagentSpawn, { providerName: 'spawn' }).await()
-    const adapter = new MockAdapter(options.script ?? [])
+    const adapter = new MockAdapter(options.script ?? [], options.reasoning)
     ctx.llm.registerAdapter(['mock'], adapter)
 
     let token: string | undefined = options.token === undefined && 'token' in options ? undefined : options.token ?? TEST_TOKEN
@@ -213,6 +217,7 @@ export async function bootHarness(options: HarnessOptions = {}): Promise<Harness
     // The Service constructor registers `sessionController` on this context.
     await createSessionTestController(ctx, {
       defaultModelSelection: (): ModelSelection => ({ provider: 'mock', model: 'mock' }),
+      ...(options.saveDefaultModelSelection === undefined ? {} : { saveDefaultModelSelection: options.saveDefaultModelSelection }),
       cwd: workspace,
     })
 
