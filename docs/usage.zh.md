@@ -6,7 +6,7 @@
 
 该端点只是 Session Controller 与 subagent 服务之上的薄转发层。它不启动第二个监听器、不启动 daemon、不保存任务数据库，也不注册任何模型可见的内容。
 
-本仓库以 DSH `0.2.0-rc.2` 为兼容测试基线。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件。
+本仓库以 DSH `0.2.1-rc.2` 为兼容测试基线；显式会话模型参数还要求[原生初始化补丁](../LOCAL_COMPATIBILITY.md#session-only-model-selection)。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件。
 
 ## 启用
 

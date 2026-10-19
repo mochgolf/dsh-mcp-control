@@ -6,7 +6,7 @@ This default-off overlay serves the Model Context Protocol on a DSH Web instance
 
 The endpoint is a thin relay over the Session Controller and subagent services. It starts no second listener and no daemon, keeps no task database, and registers nothing the model can see.
 
-This repository is tested against DSH `0.2.0-rc.2`. Install the package in the Web profile before applying the overlay; that release resolves external profile plugins.
+This repository is tested against DSH `0.2.1-rc.2`; explicit Session model inputs also require the [native initialization backport](../LOCAL_COMPATIBILITY.md#session-only-model-selection). Install the package in the Web profile before applying the overlay; that release resolves external profile plugins.
 
 ## Enable it
 

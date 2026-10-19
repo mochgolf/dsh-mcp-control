@@ -47,6 +47,7 @@ export const inject = [
   'workspaceRegistry',
   'sessions',
   'permissionPresets',
+  'typert',
 ]
 
 export { Config } from './config.ts'

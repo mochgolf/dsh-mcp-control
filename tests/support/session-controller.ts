@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ModelSelection } from '@deepseek-ai/dsh-agent'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import { TYPERT } from '@deepseek-ai/dsh-api-session-controller/typert'
+import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol'
 import type {
   AdmittedPromptContentPart,
   AttachmentAdmissionPart,
@@ -13,6 +15,7 @@ import { TestSessionQuery } from './session-query.ts'
 /** Dependencies and policy supplied by the MCP endpoint test harness. */
 export interface TestSessionControllerDefaults {
   readonly defaultModelSelection: () => ModelSelection
+  readonly saveDefaultModelSelection?: (selection: ModelSelection) => Promise<void>
   readonly cwd: string
 }
 
@@ -38,6 +41,7 @@ export async function createSessionTestController(
   if (ctx.get('typert') === undefined) {
     const dispose = (): void => {}
     ctx.provide('typert', {
+      local: { get: (endpoint: string) => (TYPERT as { invocations: readonly InvocationDescriptor[] }).invocations.find(item => item.namespace + '/' + item.method === endpoint) },
       lookups: { configure: () => dispose },
       contexts: { configureHost: () => dispose },
       resources: { register: () => dispose },
@@ -46,7 +50,7 @@ export async function createSessionTestController(
   if (ctx.get('agentDefaultModel') === undefined) {
     ctx.provide('agentDefaultModel', {
       currentSelection: defaults.defaultModelSelection,
-      saveSelection: async () => {},
+      saveSelection: defaults.saveDefaultModelSelection ?? (async () => {}),
     } as never)
   }
   if (ctx.get('llm') === undefined) {

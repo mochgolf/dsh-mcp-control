@@ -11,7 +11,7 @@ English | [中文](README.zh.md)
 
 `dsh-mcp-control` serves the Model Context Protocol on the DSH Web listener so a same-machine MCP client can drive Sessions it knows by id. Its tools create or adopt a root Session, submit and cancel work, report what a Session is doing and what came of a prompt, list its durable subagent tree, deliver to a continuable child, and read the durable event log. Every call uses the native Session Controller, subagent runtime, and Workspace Registry: the endpoint owns no task state, starts no second listener, registers no model-facing tool, and never answers an approval. A deployment inserts it deliberately, and its bearer token is full control of every Session that instance can address.
 
-This repository is tested against DSH `0.2.0-rc.2`. Install this package in the Web profile before applying the overlay below; that release resolves external profile plugins without modifying the DSH runtime.
+This repository is tested against DSH `0.2.1-rc.2`; explicit Session model inputs also require the [native initialization backport](LOCAL_COMPATIBILITY.md#session-only-model-selection). Install this package in the Web profile before applying the overlay below.
 
 ## Table of Contents
 
@@ -79,7 +79,7 @@ Every tool result carries the same object as `structuredContent` and as a `JSON.
 
 | Tool | Input | Result |
 |---|---|---|
-| `session_start` | `cwd`, `prompt`; optional `agent_preset`, `permission_preset`, `session_id`, `request_id` | `session_id`, `request_id`, `accepted`, resolved `cwd`, `workspace`, `agent_preset`, `permission_preset`, `git_worktree`, `warnings` |
+| `session_start` | `cwd`, `prompt`; optional `agent_preset`, `permission_preset`, `provider`, `model`, `reasoning_effort`, `session_id`, `request_id` | `session_id`, `request_id`, `accepted`, resolved `cwd`, `workspace`, `agent_preset`, `permission_preset`, `git_worktree`, `warnings` |
 | `session_send` | `session_id`, `message`; optional `delivery` (`queue` or `steer`), `request_id` | `session_id`, `request_id`, `accepted` |
 | `session_cancel` | `session_id`; optional `clear_queue` | `session_id`, native `accepted`; `removed_queue_items` when clearing |
 | `turn_result` | `address`, `request_id`; optional `wait_ms` | `state`, `agent_status`, `turn`, `reason`, `final_message`, `diagnostics`, `pending_approvals`, below |
@@ -96,6 +96,8 @@ Every tool result carries the same object as `structuredContent` and as a `JSON.
 `child_send` uses `request_id` to deduplicate admission for the same parent and child. Use a fresh id for new work and reuse it unchanged on retry. Concurrent retries, a lost receipt, and endpoint reload return the original `message_id` once acceptance is known; durable inbox/log records also recover it after a process restart without resuming the child. A cold parent or an unauthorized parent/child address is still refused. Retrying a message that was accepted and later discarded does not enqueue it again; explicitly use a new id for new work.
 
 `agents_list` relays native entries unchanged, including diagnostic ones. In DSH 0.1.7-rc.2 the native tree follows durable parent catalogs, so sessions absent from those catalogs are not listed; its `activity: running` means the Session record is resident, not that a model is computing, and it is not a completion state.
+
+Supply `provider` and `model` together, with optional `reasoning_effort`, to initialize a new Session without changing the deployment default. For example: `{"cwd":"/absolute/project","prompt":"Reply OK","provider":"deepseek-official","model":"deepseek-flash","reasoning_effort":"max"}`. Native `session/create` validates and logs that choice before the Agent becomes visible. An older Host lacking this capability is refused before creation. Invalid choices report `stage: "model"` without admitting the prompt. For an existing Session, every supplied field must match its first recorded choice before its first own prompt, otherwise the call returns `mcp-control/model-conflict`. An existing blank Session may already have that choice from the native GUI; matching calls continue through ordinary prompt admission. Omitting model fields preserves the native selection. Accepted retries never change the model or duplicate the prompt. The [compatibility note](LOCAL_COMPATIBILITY.md) describes the pinned native backport used for development.
 
 ### Reading durable events
 

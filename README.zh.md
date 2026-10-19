@@ -11,7 +11,7 @@ kind: "package-reference"
 
 `dsh-mcp-control` 在 DSH Web 监听器上提供 Model Context Protocol 服务，使同一台机器上的 MCP 客户端可以按 id 驱动它已经知道的会话。这些工具用于创建或采用根会话、提交与取消其工作、报告会话当前在做什么以及某条提示词得到了什么结果、列出其 durable subagent 树、向 continuable child 投递消息，以及读取 durable 事件日志。每次调用都使用原生 Session Controller、subagent 运行时与 Workspace Registry：该端点不拥有任务状态、不启动第二个监听器、不注册任何面向模型的工具，也从不代替用户回答审批。部署方主动插入该插件，其 bearer token 等同于对该实例可寻址的每个会话的完整控制权。
 
-本仓库以 DSH `0.2.0-rc.2` 为兼容测试基线。先将本包装入 Web profile，再应用下方 overlay；该版本可解析 profile 中的外部插件，无需修改 DSH runtime。
+本仓库以 DSH `0.2.1-rc.2` 为兼容测试基线；显式会话模型参数还要求[原生初始化补丁](LOCAL_COMPATIBILITY.md#session-only-model-selection)。先将本包装入 Web profile，再应用下方 overlay。
 
 ## 目录
 
@@ -79,7 +79,7 @@ tool_timeout_sec = 30
 
 | 工具 | 输入 | 结果 |
 |---|---|---|
-| `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset`、`git_worktree`、`warnings` |
+| `session_start` | `cwd`、`prompt`；可选 `agent_preset`、`permission_preset`、`provider`、`model`、`reasoning_effort`、`session_id`、`request_id` | `session_id`、`request_id`、`accepted`、解析后的 `cwd`、`workspace`、`agent_preset`、`permission_preset`、`git_worktree`、`warnings` |
 | `session_send` | `session_id`、`message`；可选 `delivery`（`queue` 或 `steer`）、`request_id` | `session_id`、`request_id`、`accepted` |
 | `session_cancel` | `session_id`；可选 `clear_queue` | `session_id`、原生 `accepted`；清空时附 `removed_queue_items` |
 | `turn_result` | `address`、`request_id`；可选 `wait_ms` | `state`、`agent_status`、`turn`、`reason`、`final_message`、`diagnostics`、`pending_approvals`，见下文 |
@@ -96,6 +96,8 @@ tool_timeout_sec = 30
 `child_send` 按同一父子地址下的 `request_id` 对接收去重：新工作使用新 id，重试原样复用。并发重试、回执丢失和端点重载后，只要已接收就返回原 `message_id`；进程重启后也能从原生 inbox/日志恢复回执，而不恢复子 Agent。冷父级或无权访问的父子地址仍会被拒绝。已经接收、随后被丢弃的消息不会因重试重新入队；要重新执行，应明确使用新的 id。
 
 `agents_list` 原样转发原生条目（包括 diagnostic 条目）。DSH 0.1.7-rc.2 的原生树沿持久化的父级 catalog 遍历，未记录于其中的会话不会列出；其中的 `activity: running` 表示会话记录常驻，而非模型正在计算，也不是完成状态。
+
+同时提供 `provider` 和 `model`，并可选提供 `reasoning_effort`，即可设置新会话的初始模型，同时保留部署默认值。例如：`{"cwd":"/absolute/project","prompt":"Reply OK","provider":"deepseek-official","model":"deepseek-flash","reasoning_effort":"max"}`。原生 `session/create` 在 Agent 可见之前校验并记录该选择；缺少此能力的旧宿主会在创建前被拒绝。无效选择返回 `stage: "model"`，不接收提示词。对于现有会话，所有提供的模型字段必须与首次自身提示词之前记录的首个选择匹配，不符时返回 `mcp-control/model-conflict`。现有空会话可以已通过原生 GUI 预选模型；匹配后沿用通常的提示词接收流程。省略模型字段则保留原生选择。已接受请求的重试不会改动模型或重复提交提示词。[兼容说明](LOCAL_COMPATIBILITY.md)记录了开发验证使用的固定版本原生补丁。
 
 ### 读取 durable 事件
 

@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "workspaceId": {
+      "type": "string",
+      "description": "Workspace the Session joins; exclusive with `cwd`."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Directory the Session owns when no Workspace is named."
+    },
+    "sessionId": {
+      "type": "string",
+      "description": "Blank Session to reuse while it is reusable, or the identity of a new Session when none is stored under it."
+    },
+    "agentPreset": {
+      "type": "string",
+      "description": "Preset the Session runs, replacing a reused Session's recorded preset; the configured default when omitted."
+    }
+  },
+  "required": [],
+  "additionalProperties": true
+}
